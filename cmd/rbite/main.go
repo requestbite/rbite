@@ -11,6 +11,7 @@ import (
 	"os"
 
 	"github.com/gorilla/websocket"
+	"github.com/joho/godotenv"
 )
 
 // Version information — set via ldflags at build time.
@@ -34,12 +35,15 @@ type controlMsg struct {
 }
 
 func main() {
+	// Load .env file
+	_ = godotenv.Load()
+
 	// Command line flags
 	var (
 		ephemeralPort = flag.Int("e", 0, "Create ephemeral tunnel to localhost port")
 		showVersion   = flag.Bool("version", false, "Show version information")
 		showHelp      = flag.Bool("help", false, "Show help information")
-		serverURL     = flag.String("server", "http://localhost:8080", "Tunnel server URL")
+		serverURL     = flag.String("server", getEnv("TUNNEL_SERVER_URL", "http://localhost:8080"), "Tunnel server URL")
 	)
 	flag.Parse()
 
@@ -71,6 +75,7 @@ func main() {
 	}
 
 	// Create ephemeral tunnel
+	fmt.Printf("Using tunnel server: %s\n", *serverURL)
 	ephemeralURL, err := createEphemeralTunnel(*serverURL, *ephemeralPort)
 	if err != nil {
 		log.Fatalf("Failed to create ephemeral tunnel: %v", err)
@@ -222,6 +227,14 @@ func (c *wsConn) Write(b []byte) (int, error) {
 		return 0, err
 	}
 	return len(b), nil
+}
+
+// getEnv retrieves environment variable with fallback default value
+func getEnv(key, fallback string) string {
+	if value, exists := os.LookupEnv(key); exists {
+		return value
+	}
+	return fallback
 }
 
 // Ensure wsConn satisfies io.ReadWriter (used by io.Copy).
