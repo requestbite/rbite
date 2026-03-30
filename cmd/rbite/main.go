@@ -39,21 +39,45 @@ type controlMsg struct {
 	ConnID string `json:"conn_id"`
 }
 
+func printHelp() {
+	defaultServer := getEnv("TUNNEL_SERVER_URL", "http://localhost:8080")
+	fmt.Printf("RequestBite Tunnel v%s\n\n", Version)
+	fmt.Println("Usage:")
+	fmt.Printf("  rbite [options]\n\n")
+	fmt.Println("Options:")
+	fmt.Printf("  -e, --expose int      Port to expose via ephemeral tunnel\n")
+	fmt.Printf("  -h, --help            Show help information\n")
+	fmt.Printf("  -s, --server string   Tunnel server URL (default %q)\n", defaultServer)
+	fmt.Printf("  -v, --version         Show version information\n")
+	fmt.Println()
+}
+
 func main() {
 	// Load .env file
 	_ = godotenv.Load()
 
 	// Command line flags
 	var (
-		ephemeralPort = flag.Int("e", 0, "Create ephemeral tunnel to localhost port")
-		showVersion   = flag.Bool("version", false, "Show version information")
-		showHelp      = flag.Bool("help", false, "Show help information")
-		serverURL     = flag.String("server", getEnv("TUNNEL_SERVER_URL", "http://localhost:8080"), "Tunnel server URL")
+		ephemeralPort int
+		showVersion   bool
+		showHelp      bool
+		serverURL     string
 	)
+	defaultServer := getEnv("TUNNEL_SERVER_URL", "http://localhost:8080")
+
+	flag.IntVar(&ephemeralPort, "e", 0, "")
+	flag.IntVar(&ephemeralPort, "expose", 0, "")
+	flag.BoolVar(&showVersion, "v", false, "")
+	flag.BoolVar(&showVersion, "version", false, "")
+	flag.BoolVar(&showHelp, "h", false, "")
+	flag.BoolVar(&showHelp, "help", false, "")
+	flag.StringVar(&serverURL, "s", defaultServer, "")
+	flag.StringVar(&serverURL, "server", defaultServer, "")
+	flag.Usage = printHelp
 	flag.Parse()
 
 	// Show version
-	if *showVersion {
+	if showVersion {
 		fmt.Printf("rbite v%s\n", Version)
 		if BuildTime != "unknown" {
 			fmt.Printf("Built: %s\n", BuildTime)
@@ -65,36 +89,32 @@ func main() {
 	}
 
 	// Show help
-	if *showHelp {
-		fmt.Printf("rbite v%s\n\n", Version)
-		fmt.Println("Usage:")
-		fmt.Printf("  rbite [options]\n\n")
-		fmt.Println("Options:")
-		flag.PrintDefaults()
+	if showHelp {
+		printHelp()
 		os.Exit(0)
 	}
 
 	// Validate ephemeral port
-	if *ephemeralPort == 0 {
-		log.Fatal("Error: -e flag is required to specify the localhost port")
+	if ephemeralPort == 0 {
+		log.Fatal("Error: -e/--expose flag is required to specify the localhost port")
 	}
 
 	clientID := uuid.New().String()
 
 	// Create ephemeral tunnel
-	ephemeralResp, err := createEphemeralTunnel(*serverURL, *ephemeralPort, clientID)
+	ephemeralResp, err := createEphemeralTunnel(serverURL, ephemeralPort, clientID)
 	if err != nil {
 		log.Fatalf("Failed to create ephemeral tunnel: %v", err)
 	}
 
-	fmt.Printf("Ephemeral tunnel created on %s. Expires at %s.\n", serverHostname(*serverURL), ephemeralResp.ExpiresAt.Local().Format("15:04:05"))
+	fmt.Printf("Ephemeral tunnel created on %s. Expires at %s.\n", serverHostname(serverURL), ephemeralResp.ExpiresAt.Local().Format("15:04:05"))
 	fmt.Printf("Internet endpoint: https://%s\n", ephemeralResp.URL)
-	fmt.Printf("Local service: http://localhost:%d\n", *ephemeralPort)
+	fmt.Printf("Local service: http://localhost:%d\n", ephemeralPort)
 	fmt.Printf("Press Ctrl+C to stop\n\n")
 
 	// Connect to tunnel server
-	localAddr := fmt.Sprintf("localhost:%d", *ephemeralPort)
-	connectToTunnelServer(*serverURL, clientID, localAddr, ephemeralResp.ExpiresAt)
+	localAddr := fmt.Sprintf("localhost:%d", ephemeralPort)
+	connectToTunnelServer(serverURL, clientID, localAddr, ephemeralResp.ExpiresAt)
 }
 
 func createEphemeralTunnel(serverURL string, port int, clientID string) (*CreateEphemeralResponse, error) {
