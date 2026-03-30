@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/joho/godotenv"
 )
@@ -22,7 +24,8 @@ var (
 )
 
 type CreateEphemeralRequest struct {
-	Port int `json:"port"`
+	Port     int    `json:"port"`
+	ClientID string `json:"client_id"`
 }
 
 type CreateEphemeralResponse struct {
@@ -74,9 +77,11 @@ func main() {
 		log.Fatal("Error: -e flag is required to specify the localhost port")
 	}
 
+	clientID := uuid.New().String()
+
 	// Create ephemeral tunnel
 	fmt.Printf("Using tunnel server: %s\n", *serverURL)
-	ephemeralURL, err := createEphemeralTunnel(*serverURL, *ephemeralPort)
+	ephemeralURL, err := createEphemeralTunnel(*serverURL, *ephemeralPort, clientID)
 	if err != nil {
 		log.Fatalf("Failed to create ephemeral tunnel: %v", err)
 	}
@@ -88,12 +93,16 @@ func main() {
 
 	// Connect to tunnel server
 	localAddr := fmt.Sprintf("localhost:%d", *ephemeralPort)
-	connectToTunnelServer(*serverURL, localAddr)
+	connectToTunnelServer(*serverURL, clientID, localAddr)
 }
 
-func createEphemeralTunnel(serverURL string, port int) (string, error) {
+func createEphemeralTunnel(serverURL string, port int, clientID string) (string, error) {
 	// Send POST request to create ephemeral tunnel
-	resp, err := http.Post(serverURL+"/v1/ephemeral", "application/json", nil)
+	body, err := json.Marshal(CreateEphemeralRequest{Port: port, ClientID: clientID})
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal request: %v", err)
+	}
+	resp, err := http.Post(serverURL+"/v1/ephemeral", "application/json", bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("failed to create ephemeral tunnel: %v", err)
 	}
@@ -113,8 +122,18 @@ func createEphemeralTunnel(serverURL string, port int) (string, error) {
 	return ephemeralResp.URL, nil
 }
 
-func connectToTunnelServer(serverURL, localAddr string) {
-	ctrlURL := serverURL + "/tunnel/connect"
+func toWSURL(serverURL string) string {
+	switch {
+	case len(serverURL) >= 8 && serverURL[:8] == "https://":
+		return "wss://" + serverURL[8:]
+	case len(serverURL) >= 7 && serverURL[:7] == "http://":
+		return "ws://" + serverURL[7:]
+	}
+	return serverURL
+}
+
+func connectToTunnelServer(serverURL, clientID, localAddr string) {
+	ctrlURL := toWSURL(serverURL) + "/tunnel/connect?client_id=" + clientID
 	ws, resp, err := websocket.DefaultDialer.Dial(ctrlURL, nil)
 	if err != nil {
 		if resp != nil {
@@ -150,7 +169,7 @@ func connectToTunnelServer(serverURL, localAddr string) {
 // all bytes between them.
 func handleTunneledConnection(serverURL, connID, localAddr string) {
 	// 1. Open data stream WebSocket to the server.
-	streamURL := serverURL + "/tunnel/stream/" + connID
+	streamURL := toWSURL(serverURL) + "/tunnel/stream/" + connID
 	streamWS, _, err := websocket.DefaultDialer.Dial(streamURL, nil)
 	if err != nil {
 		log.Printf("stream dial failed (connId=%s): %v", connID, err)
