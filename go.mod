@@ -9,5 +9,6 @@ require (
 
 require (
 	github.com/google/uuid v1.6.0 // indirect
+	github.com/hashicorp/yamux v0.1.2 // indirect
 	golang.org/x/net v0.23.0 // indirect
 )

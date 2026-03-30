@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	"github.com/hashicorp/yamux"
 	"github.com/joho/godotenv"
 )
 
@@ -32,11 +33,6 @@ type CreateEphemeralRequest struct {
 type CreateEphemeralResponse struct {
 	URL       string    `json:"url"`
 	ExpiresAt time.Time `json:"expires_at"`
-}
-
-type controlMsg struct {
-	Type   string `json:"type"`
-	ConnID string `json:"conn_id"`
 }
 
 func printHelp() {
@@ -154,31 +150,38 @@ func toWSURL(serverURL string) string {
 }
 
 func connectToTunnelServer(serverURL, clientID, localAddr string, expiresAt time.Time) {
-	ctrlURL := toWSURL(serverURL) + "/tunnel/connect?client_id=" + clientID
-	ws, resp, err := websocket.DefaultDialer.Dial(ctrlURL, nil)
+	muxURL := toWSURL(serverURL) + "/tunnel/mux?client_id=" + clientID
+	ws, resp, err := websocket.DefaultDialer.Dial(muxURL, nil)
 	if err != nil {
 		if resp != nil {
-			log.Fatalf("control dial failed (HTTP %d): %v", resp.StatusCode, err)
+			log.Fatalf("mux dial failed (HTTP %d): %v", resp.StatusCode, err)
 		}
-		log.Fatalf("control dial failed: %v", err)
+		log.Fatalf("mux dial failed: %v", err)
 	}
 	defer ws.Close()
+
+	// The tunnel client accepts streams opened by the server → yamux.Server role.
+	session, err := yamux.Server(newWSConn(ws), nil)
+	if err != nil {
+		log.Fatalf("yamux session failed: %v", err)
+	}
+	defer session.Close()
 
 	log.Printf("Connected to tunnel server, waiting for connections...")
 
 	expiry := time.NewTimer(time.Until(expiresAt))
 	defer expiry.Stop()
 
-	msgCh := make(chan []byte)
+	streamCh := make(chan net.Conn)
 	errCh := make(chan error, 1)
 	go func() {
 		for {
-			_, raw, err := ws.ReadMessage()
+			stream, err := session.Accept()
 			if err != nil {
 				errCh <- err
 				return
 			}
-			msgCh <- raw
+			streamCh <- stream
 		}
 	}()
 
@@ -188,60 +191,35 @@ func connectToTunnelServer(serverURL, clientID, localAddr string, expiresAt time
 			log.Printf("Tunnel expired. Disconnecting.")
 			return
 		case err := <-errCh:
-			log.Fatalf("control channel closed: %v", err)
-		case raw := <-msgCh:
-			var msg controlMsg
-			if err := json.Unmarshal(raw, &msg); err != nil {
-				log.Printf("unrecognised control message: %s", raw)
-				continue
-			}
-			if msg.Type == "new_connection" {
-				log.Printf("New connection request connId=%s", msg.ConnID)
-				go handleTunneledConnection(serverURL, msg.ConnID, localAddr)
-			}
+			log.Fatalf("mux session closed: %v", err)
+		case stream := <-streamCh:
+			go handleTunneledConnection(stream, localAddr)
 		}
 	}
 }
 
-// handleTunneledConnection opens a WebSocket data stream back to the server for
-// the given connId, connects to the local service, and bidirectionally proxies
-// all bytes between them.
-func handleTunneledConnection(serverURL, connID, localAddr string) {
-	// 1. Open data stream WebSocket to the server.
-	streamURL := toWSURL(serverURL) + "/tunnel/stream/" + connID
-	streamWS, _, err := websocket.DefaultDialer.Dial(streamURL, nil)
-	if err != nil {
-		log.Printf("stream dial failed (connId=%s): %v", connID, err)
-		return
-	}
-	defer streamWS.Close()
+// handleTunneledConnection proxies bytes between an inbound yamux stream
+// (from the tunnel server) and the local service.
+func handleTunneledConnection(stream net.Conn, localAddr string) {
+	defer stream.Close()
 
-	// 2. Connect to the local service.
 	localConn, err := net.Dial("tcp", localAddr)
 	if err != nil {
-		log.Printf("local service dial failed (connId=%s, addr=%s): %v", connID, localAddr, err)
+		log.Printf("local service dial failed (%s): %v", localAddr, err)
 		return
 	}
 	defer localConn.Close()
 
-	log.Printf("Bridging connId=%s <-> %s", connID, localAddr)
-
-	// 3. Wrap the WebSocket as a net.Conn for io.Copy.
-	streamConn := newWSConn(streamWS)
-
-	// 4. Bidirectional copy: tunnel stream <-> local service.
 	done := make(chan struct{}, 2)
 	go func() {
-		io.Copy(localConn, streamConn)
+		io.Copy(localConn, stream)
 		done <- struct{}{}
 	}()
 	go func() {
-		io.Copy(streamConn, localConn)
+		io.Copy(stream, localConn)
 		done <- struct{}{}
 	}()
 	<-done
-
-	log.Printf("Connection closed connId=%s", connID)
 }
 
 // wsConn wraps *websocket.Conn as an io.ReadWriter so io.Copy can drive it.
@@ -287,6 +265,10 @@ func (c *wsConn) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
+func (c *wsConn) Close() error {
+	return c.ws.Close()
+}
+
 // serverHostname strips the scheme from a URL, returning just the host.
 func serverHostname(serverURL string) string {
 	switch {
@@ -306,5 +288,5 @@ func getEnv(key, fallback string) string {
 	return fallback
 }
 
-// Ensure wsConn satisfies io.ReadWriter (used by io.Copy).
-var _ io.ReadWriter = (*wsConn)(nil)
+// Ensure wsConn satisfies io.ReadWriteCloser (required by yamux).
+var _ io.ReadWriteCloser = (*wsConn)(nil)
