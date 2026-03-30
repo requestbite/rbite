@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
@@ -29,7 +30,8 @@ type CreateEphemeralRequest struct {
 }
 
 type CreateEphemeralResponse struct {
-	URL string `json:"url"`
+	URL       string    `json:"url"`
+	ExpiresAt time.Time `json:"expires_at"`
 }
 
 type controlMsg struct {
@@ -80,46 +82,45 @@ func main() {
 	clientID := uuid.New().String()
 
 	// Create ephemeral tunnel
-	fmt.Printf("Using tunnel server: %s\n", *serverURL)
-	ephemeralURL, err := createEphemeralTunnel(*serverURL, *ephemeralPort, clientID)
+	ephemeralResp, err := createEphemeralTunnel(*serverURL, *ephemeralPort, clientID)
 	if err != nil {
 		log.Fatalf("Failed to create ephemeral tunnel: %v", err)
 	}
 
-	fmt.Printf("Ephemeral tunnel created!\n")
-	fmt.Printf("Internet endpoint: %s\n", ephemeralURL)
-	fmt.Printf("Local service: localhost:%d\n", *ephemeralPort)
+	fmt.Printf("Ephemeral tunnel created on %s. Expires at %s.\n", serverHostname(*serverURL), ephemeralResp.ExpiresAt.Local().Format("15:04:05"))
+	fmt.Printf("Internet endpoint: https://%s\n", ephemeralResp.URL)
+	fmt.Printf("Local service: http://localhost:%d\n", *ephemeralPort)
 	fmt.Printf("Press Ctrl+C to stop\n\n")
 
 	// Connect to tunnel server
 	localAddr := fmt.Sprintf("localhost:%d", *ephemeralPort)
-	connectToTunnelServer(*serverURL, clientID, localAddr)
+	connectToTunnelServer(*serverURL, clientID, localAddr, ephemeralResp.ExpiresAt)
 }
 
-func createEphemeralTunnel(serverURL string, port int, clientID string) (string, error) {
+func createEphemeralTunnel(serverURL string, port int, clientID string) (*CreateEphemeralResponse, error) {
 	// Send POST request to create ephemeral tunnel
 	body, err := json.Marshal(CreateEphemeralRequest{Port: port, ClientID: clientID})
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal request: %v", err)
+		return nil, fmt.Errorf("failed to marshal request: %v", err)
 	}
 	resp, err := http.Post(serverURL+"/v1/ephemeral", "application/json", bytes.NewReader(body))
 	if err != nil {
-		return "", fmt.Errorf("failed to create ephemeral tunnel: %v", err)
+		return nil, fmt.Errorf("failed to create ephemeral tunnel: %v", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("server returned status %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("server returned status %d: %s", resp.StatusCode, string(body))
 	}
 
 	// Parse response
 	var ephemeralResp CreateEphemeralResponse
 	if err := json.NewDecoder(resp.Body).Decode(&ephemeralResp); err != nil {
-		return "", fmt.Errorf("failed to decode response: %v", err)
+		return nil, fmt.Errorf("failed to decode response: %v", err)
 	}
 
-	return ephemeralResp.URL, nil
+	return &ephemeralResp, nil
 }
 
 func toWSURL(serverURL string) string {
@@ -132,7 +133,7 @@ func toWSURL(serverURL string) string {
 	return serverURL
 }
 
-func connectToTunnelServer(serverURL, clientID, localAddr string) {
+func connectToTunnelServer(serverURL, clientID, localAddr string, expiresAt time.Time) {
 	ctrlURL := toWSURL(serverURL) + "/tunnel/connect?client_id=" + clientID
 	ws, resp, err := websocket.DefaultDialer.Dial(ctrlURL, nil)
 	if err != nil {
@@ -145,21 +146,39 @@ func connectToTunnelServer(serverURL, clientID, localAddr string) {
 
 	log.Printf("Connected to tunnel server, waiting for connections...")
 
+	expiry := time.NewTimer(time.Until(expiresAt))
+	defer expiry.Stop()
+
+	msgCh := make(chan []byte)
+	errCh := make(chan error, 1)
+	go func() {
+		for {
+			_, raw, err := ws.ReadMessage()
+			if err != nil {
+				errCh <- err
+				return
+			}
+			msgCh <- raw
+		}
+	}()
+
 	for {
-		_, raw, err := ws.ReadMessage()
-		if err != nil {
+		select {
+		case <-expiry.C:
+			log.Printf("Tunnel expired. Disconnecting.")
+			return
+		case err := <-errCh:
 			log.Fatalf("control channel closed: %v", err)
-		}
-
-		var msg controlMsg
-		if err := json.Unmarshal(raw, &msg); err != nil {
-			log.Printf("unrecognised control message: %s", raw)
-			continue
-		}
-
-		if msg.Type == "new_connection" {
-			log.Printf("New connection request connId=%s", msg.ConnID)
-			go handleTunneledConnection(serverURL, msg.ConnID, localAddr)
+		case raw := <-msgCh:
+			var msg controlMsg
+			if err := json.Unmarshal(raw, &msg); err != nil {
+				log.Printf("unrecognised control message: %s", raw)
+				continue
+			}
+			if msg.Type == "new_connection" {
+				log.Printf("New connection request connId=%s", msg.ConnID)
+				go handleTunneledConnection(serverURL, msg.ConnID, localAddr)
+			}
 		}
 	}
 }
@@ -246,6 +265,17 @@ func (c *wsConn) Write(b []byte) (int, error) {
 		return 0, err
 	}
 	return len(b), nil
+}
+
+// serverHostname strips the scheme from a URL, returning just the host.
+func serverHostname(serverURL string) string {
+	switch {
+	case len(serverURL) >= 8 && serverURL[:8] == "https://":
+		return serverURL[8:]
+	case len(serverURL) >= 7 && serverURL[:7] == "http://":
+		return serverURL[7:]
+	}
+	return serverURL
 }
 
 // getEnv retrieves environment variable with fallback default value
