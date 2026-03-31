@@ -13,12 +13,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/hashicorp/yamux"
 	"github.com/joho/godotenv"
+	"gopkg.in/yaml.v3"
 )
 
 // Version information — set via ldflags at build time.
@@ -27,6 +29,62 @@ var (
 	BuildTime = "unknown"
 	GitCommit = "unknown"
 )
+
+type Config struct {
+	ClientID string `yaml:"clientId"`
+}
+
+// loadOrCreateConfig reads ~/.config/rbite/config.yaml, creating it with a
+// fresh UUIDv4 clientId if it does not already exist.
+func loadOrCreateConfig() (*Config, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("could not determine home directory: %w", err)
+	}
+	cfgDir := filepath.Join(home, ".config", "rbite")
+	cfgPath := filepath.Join(cfgDir, "config.yaml")
+
+	data, err := os.ReadFile(cfgPath)
+	if err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("could not read config file: %w", err)
+	}
+
+	var cfg Config
+	if os.IsNotExist(err) {
+		// Create directory and file with a new clientId.
+		if mkErr := os.MkdirAll(cfgDir, 0o755); mkErr != nil {
+			return nil, fmt.Errorf("could not create config directory: %w", mkErr)
+		}
+		cfg.ClientID = uuid.New().String()
+		out, marshalErr := yaml.Marshal(&cfg)
+		if marshalErr != nil {
+			return nil, fmt.Errorf("could not marshal config: %w", marshalErr)
+		}
+		if writeErr := os.WriteFile(cfgPath, out, 0o644); writeErr != nil {
+			return nil, fmt.Errorf("could not write config file: %w", writeErr)
+		}
+		fmt.Printf("Created default configuration file in ~/.config/rbite/config.yaml\n")
+		return &cfg, nil
+	}
+
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("could not parse config file: %w", err)
+	}
+
+	// Populate missing clientId and persist.
+	if cfg.ClientID == "" {
+		cfg.ClientID = uuid.New().String()
+		out, marshalErr := yaml.Marshal(&cfg)
+		if marshalErr != nil {
+			return nil, fmt.Errorf("could not marshal config: %w", marshalErr)
+		}
+		if writeErr := os.WriteFile(cfgPath, out, 0o644); writeErr != nil {
+			return nil, fmt.Errorf("could not write config file: %w", writeErr)
+		}
+	}
+
+	return &cfg, nil
+}
 
 type CreateEphemeralRequest struct {
 	Port     int    `json:"port"`
@@ -98,7 +156,11 @@ func main() {
 		log.Fatal("Error: -e/--expose flag is required to specify the localhost port")
 	}
 
-	clientID := uuid.New().String()
+	cfg, err := loadOrCreateConfig()
+	if err != nil {
+		log.Fatalf("Failed to load config: %v", err)
+	}
+	clientID := cfg.ClientID
 
 	// Create ephemeral tunnel
 	ephemeralResp, err := createEphemeralTunnel(serverURL, ephemeralPort, clientID)
