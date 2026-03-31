@@ -16,6 +16,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"errors"
+
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/hashicorp/yamux"
@@ -85,6 +87,8 @@ func loadOrCreateConfig() (*Config, error) {
 
 	return &cfg, nil
 }
+
+var errSessionConflict = errors.New("session conflict")
 
 type CreateEphemeralRequest struct {
 	Port     int    `json:"port"`
@@ -165,10 +169,19 @@ func main() {
 	// Create ephemeral tunnel
 	ephemeralResp, err := createEphemeralTunnel(serverURL, ephemeralPort, clientID)
 	if err != nil {
-		log.Fatalf("Failed to create ephemeral tunnel: %v", err)
+		if errors.Is(err, errSessionConflict) {
+			fmt.Fprintln(os.Stderr, "This client already has a session open. Only 1 ephemeral session is possible at once.")
+		} else {
+			fmt.Fprintf(os.Stderr, "Failed to create ephemeral tunnel: %v\n", err)
+		}
+		os.Exit(1)
 	}
 
-	fmt.Printf("Ephemeral tunnel created on %s. Expires at %s.\n", serverHostname(serverURL), ephemeralResp.ExpiresAt.Local().Format("15:04:05"))
+	expiresIn := int(time.Until(ephemeralResp.ExpiresAt).Minutes())
+	if time.Until(ephemeralResp.ExpiresAt) > time.Duration(expiresIn)*time.Minute {
+		expiresIn++
+	}
+	fmt.Printf("Ephemeral tunnel created. Expires at %s (in %d minutes).\n", ephemeralResp.ExpiresAt.Local().Format("15:04:05"), expiresIn)
 	fmt.Printf("Internet endpoint: https://%s\n", ephemeralResp.URL)
 	fmt.Printf("Local service: http://localhost:%d\n", ephemeralPort)
 	fmt.Printf("Press Ctrl+C to stop\n\n")
@@ -204,6 +217,9 @@ func createEphemeralTunnel(serverURL string, port int, clientID string) (*Create
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusConflict {
+		return nil, errSessionConflict
+	}
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("server returned status %d: %s", resp.StatusCode, string(body))
