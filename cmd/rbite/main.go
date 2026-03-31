@@ -100,6 +100,12 @@ type CreateEphemeralResponse struct {
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
+type ActiveSessionResponse struct {
+	URL       string    `json:"url"`
+	ExpiresAt time.Time `json:"expires_at"`
+	Port      int       `json:"port"`
+}
+
 func printHelp() {
 	defaultServer := getEnv("TUNNEL_SERVER_URL", "http://localhost:8080")
 	fmt.Printf("RequestBite Tunnel v%s\n\n", Version)
@@ -108,6 +114,7 @@ func printHelp() {
 	fmt.Println("Options:")
 	fmt.Printf("  -e, --expose int      Port to expose via ephemeral tunnel\n")
 	fmt.Printf("  -h, --help            Show help information\n")
+	fmt.Printf("  -r, --resume          Resume the last session if it has not expired\n")
 	fmt.Printf("  -s, --server string   Tunnel server URL (default %q)\n", defaultServer)
 	fmt.Printf("  -v, --version         Show version information\n")
 	fmt.Println()
@@ -122,6 +129,7 @@ func main() {
 		ephemeralPort int
 		showVersion   bool
 		showHelp      bool
+		resume        bool
 		serverURL     string
 	)
 	defaultServer := getEnv("TUNNEL_SERVER_URL", "http://localhost:8080")
@@ -132,6 +140,8 @@ func main() {
 	flag.BoolVar(&showVersion, "version", false, "")
 	flag.BoolVar(&showHelp, "h", false, "")
 	flag.BoolVar(&showHelp, "help", false, "")
+	flag.BoolVar(&resume, "r", false, "")
+	flag.BoolVar(&resume, "resume", false, "")
 	flag.StringVar(&serverURL, "s", defaultServer, "")
 	flag.StringVar(&serverURL, "server", defaultServer, "")
 	flag.Usage = printHelp
@@ -155,8 +165,11 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Validate ephemeral port
-	if ephemeralPort == 0 {
+	// Validate flags
+	if resume && ephemeralPort != 0 {
+		log.Fatal("Error: --resume and --expose cannot be used together")
+	}
+	if !resume && ephemeralPort == 0 {
 		log.Fatal("Error: -e/--expose flag is required to specify the localhost port")
 	}
 
@@ -166,25 +179,53 @@ func main() {
 	}
 	clientID := cfg.ClientID
 
-	// Create ephemeral tunnel
-	ephemeralResp, err := createEphemeralTunnel(serverURL, ephemeralPort, clientID)
-	if err != nil {
-		if errors.Is(err, errSessionConflict) {
-			fmt.Fprintln(os.Stderr, "This client already has a session open. Only 1 ephemeral session is possible at once.")
-		} else {
-			fmt.Fprintf(os.Stderr, "Failed to create ephemeral tunnel: %v\n", err)
-		}
-		os.Exit(1)
-	}
+	var tunnelURL string
+	var expiresAt time.Time
 
-	expiresIn := int(time.Until(ephemeralResp.ExpiresAt).Minutes())
-	if time.Until(ephemeralResp.ExpiresAt) > time.Duration(expiresIn)*time.Minute {
-		expiresIn++
+	if resume {
+		activeResp, err := getActiveSession(serverURL, clientID)
+		if err != nil {
+			if errors.Is(err, errSessionConflict) {
+				fmt.Fprintln(os.Stderr, "Session is already active — no need to resume.")
+			} else {
+				fmt.Fprintf(os.Stderr, "Cannot resume: %v\n", err)
+			}
+			os.Exit(1)
+		}
+		ephemeralPort = activeResp.Port
+		tunnelURL = activeResp.URL
+		expiresAt = activeResp.ExpiresAt
+
+		expiresIn := int(time.Until(expiresAt).Minutes())
+		if time.Until(expiresAt) > time.Duration(expiresIn)*time.Minute {
+			expiresIn++
+		}
+		fmt.Printf("Resuming previous session. Expires at %s (in %d minutes).\n", expiresAt.Local().Format("15:04:05"), expiresIn)
+		fmt.Printf("Internet endpoint: https://%s\n", tunnelURL)
+		fmt.Printf("Local service: http://localhost:%d\n", ephemeralPort)
+		fmt.Printf("Press Ctrl+C to stop\n\n")
+	} else {
+		ephemeralResp, err := createEphemeralTunnel(serverURL, ephemeralPort, clientID)
+		if err != nil {
+			if errors.Is(err, errSessionConflict) {
+				fmt.Fprintln(os.Stderr, "This client already has a session open. Only 1 ephemeral session is possible at once.")
+			} else {
+				fmt.Fprintf(os.Stderr, "Failed to create ephemeral tunnel: %v\n", err)
+			}
+			os.Exit(1)
+		}
+		tunnelURL = ephemeralResp.URL
+		expiresAt = ephemeralResp.ExpiresAt
+
+		expiresIn := int(time.Until(expiresAt).Minutes())
+		if time.Until(expiresAt) > time.Duration(expiresIn)*time.Minute {
+			expiresIn++
+		}
+		fmt.Printf("Ephemeral tunnel created. Expires at %s (in %d minutes).\n", expiresAt.Local().Format("15:04:05"), expiresIn)
+		fmt.Printf("Internet endpoint: https://%s\n", tunnelURL)
+		fmt.Printf("Local service: http://localhost:%d\n", ephemeralPort)
+		fmt.Printf("Press Ctrl+C to stop\n\n")
 	}
-	fmt.Printf("Ephemeral tunnel created. Expires at %s (in %d minutes).\n", ephemeralResp.ExpiresAt.Local().Format("15:04:05"), expiresIn)
-	fmt.Printf("Internet endpoint: https://%s\n", ephemeralResp.URL)
-	fmt.Printf("Local service: http://localhost:%d\n", ephemeralPort)
-	fmt.Printf("Press Ctrl+C to stop\n\n")
 
 	// Cancel the context on Ctrl-C so connectToTunnelServer returns cleanly.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -199,7 +240,7 @@ func main() {
 
 	// Connect to tunnel server; blocks until the session ends.
 	localAddr := fmt.Sprintf("localhost:%d", ephemeralPort)
-	connectToTunnelServer(ctx, serverURL, clientID, localAddr, ephemeralResp.ExpiresAt)
+	connectToTunnelServer(ctx, serverURL, clientID, localAddr, expiresAt)
 
 	// Fetch and print session stats once the tunnel is done.
 	printSessionStats(serverURL, clientID)
@@ -232,6 +273,31 @@ func createEphemeralTunnel(serverURL string, port int, clientID string) (*Create
 	}
 
 	return &ephemeralResp, nil
+}
+
+func getActiveSession(serverURL, clientID string) (*ActiveSessionResponse, error) {
+	resp, err := http.Get(serverURL + "/v1/ephemeral/active?client_id=" + clientID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to reach server: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusConflict {
+		return nil, errSessionConflict
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("no previous session found (it may have expired)")
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("server returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var active ActiveSessionResponse
+	if err := json.NewDecoder(resp.Body).Decode(&active); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %v", err)
+	}
+	return &active, nil
 }
 
 func toWSURL(serverURL string) string {
