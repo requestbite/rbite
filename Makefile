@@ -9,7 +9,7 @@
 VERSION ?= $(shell if git describe --tags --exact-match 2>/dev/null >/dev/null; then \
 	git describe --tags --exact-match | sed 's/^v//'; \
 else \
-	git describe --tags 2>/dev/null | sed 's/^v//' | sed 's/-[0-9]\+-//' || echo "dev"; \
+	git describe --tags 2>/dev/null | sed 's/^v//' | sed 's/-[0-9]\+-g/-/' || echo "dev"; \
 fi)
 
 # Binary name
