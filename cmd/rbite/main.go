@@ -109,9 +109,12 @@ func main() {
 	fmt.Printf("Local service: http://localhost:%d\n", ephemeralPort)
 	fmt.Printf("Press Ctrl+C to stop\n\n")
 
-	// Connect to tunnel server
+	// Connect to tunnel server; blocks until the session ends.
 	localAddr := fmt.Sprintf("localhost:%d", ephemeralPort)
 	connectToTunnelServer(serverURL, clientID, localAddr, ephemeralResp.ExpiresAt)
+
+	// Fetch and print session stats once the tunnel is done.
+	printSessionStats(serverURL, clientID)
 }
 
 func createEphemeralTunnel(serverURL string, port int, clientID string) (*CreateEphemeralResponse, error) {
@@ -192,7 +195,8 @@ func connectToTunnelServer(serverURL, clientID, localAddr string, expiresAt time
 			log.Printf("Tunnel expired. Disconnecting.")
 			return
 		case err := <-errCh:
-			log.Fatalf("mux session closed: %v", err)
+			log.Printf("mux session closed: %v", err)
+			return
 		case stream := <-streamCh:
 			go handleTunneledConnection(stream, localAddr)
 		}
@@ -253,6 +257,31 @@ func handleTunneledConnection(stream net.Conn, localAddr string) {
 	}
 
 	log.Printf("%s %s %d %s", req.Method, req.URL.RequestURI(), resp.StatusCode, time.Since(start).Round(time.Millisecond))
+}
+
+// printSessionStats fetches session statistics from the server and prints them.
+func printSessionStats(serverURL, clientID string) {
+	resp, err := http.Get(serverURL + "/v1/ephemeral/" + clientID)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return
+	}
+
+	var s struct {
+		TransferSizeMb float64 `json:"transferSizeMb"`
+		Requests       int64   `json:"requests"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&s); err != nil {
+		return
+	}
+
+	fmt.Printf("\n--- Session summary ---\n")
+	fmt.Printf("Requests served:  %d\n", s.Requests)
+	fmt.Printf("Data transferred: %.2f MB\n", s.TransferSizeMb)
 }
 
 // wsConn wraps *websocket.Conn as an io.ReadWriter so io.Copy can drive it.
