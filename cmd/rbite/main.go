@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"time"
 
 	"github.com/google/uuid"
@@ -109,9 +111,20 @@ func main() {
 	fmt.Printf("Local service: http://localhost:%d\n", ephemeralPort)
 	fmt.Printf("Press Ctrl+C to stop\n\n")
 
+	// Cancel the context on Ctrl-C so connectToTunnelServer returns cleanly.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt)
+	go func() {
+		<-sigCh
+		fmt.Println()
+		cancel()
+	}()
+
 	// Connect to tunnel server; blocks until the session ends.
 	localAddr := fmt.Sprintf("localhost:%d", ephemeralPort)
-	connectToTunnelServer(serverURL, clientID, localAddr, ephemeralResp.ExpiresAt)
+	connectToTunnelServer(ctx, serverURL, clientID, localAddr, ephemeralResp.ExpiresAt)
 
 	// Fetch and print session stats once the tunnel is done.
 	printSessionStats(serverURL, clientID)
@@ -153,7 +166,7 @@ func toWSURL(serverURL string) string {
 	return serverURL
 }
 
-func connectToTunnelServer(serverURL, clientID, localAddr string, expiresAt time.Time) {
+func connectToTunnelServer(ctx context.Context, serverURL, clientID, localAddr string, expiresAt time.Time) {
 	muxURL := toWSURL(serverURL) + "/tunnel/mux?client_id=" + clientID
 	ws, resp, err := websocket.DefaultDialer.Dial(muxURL, nil)
 	if err != nil {
@@ -191,6 +204,8 @@ func connectToTunnelServer(serverURL, clientID, localAddr string, expiresAt time
 
 	for {
 		select {
+		case <-ctx.Done():
+			return
 		case <-expiry.C:
 			log.Printf("Tunnel expired. Disconnecting.")
 			return
