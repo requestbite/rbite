@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"flag"
@@ -198,28 +199,60 @@ func connectToTunnelServer(serverURL, clientID, localAddr string, expiresAt time
 	}
 }
 
-// handleTunneledConnection proxies bytes between an inbound yamux stream
-// (from the tunnel server) and the local service.
+// handleTunneledConnection proxies one HTTP request/response between an inbound
+// yamux stream and the local service, logging the method, path, status, and duration.
+// For WebSocket upgrades (101) it falls back to a raw bidirectional copy after
+// forwarding the handshake, preserving any bytes already buffered by the readers.
 func handleTunneledConnection(stream net.Conn, localAddr string) {
 	defer stream.Close()
 
 	localConn, err := net.Dial("tcp", localAddr)
 	if err != nil {
-		log.Printf("local service dial failed (%s): %v", localAddr, err)
+		log.Printf("local dial failed (%s): %v", localAddr, err)
 		return
 	}
 	defer localConn.Close()
 
-	done := make(chan struct{}, 2)
-	go func() {
-		io.Copy(localConn, stream)
-		done <- struct{}{}
-	}()
-	go func() {
-		io.Copy(stream, localConn)
-		done <- struct{}{}
-	}()
-	<-done
+	start := time.Now()
+
+	// Keep buffered readers in scope — needed for the WebSocket fallback so that
+	// any bytes read ahead past the HTTP headers are not lost.
+	streamBuf := bufio.NewReader(stream)
+	localBuf := bufio.NewReader(localConn)
+
+	req, err := http.ReadRequest(streamBuf)
+	if err != nil {
+		log.Printf("failed to read request: %v", err)
+		return
+	}
+
+	if err := req.Write(localConn); err != nil {
+		log.Printf("failed to forward request: %v", err)
+		return
+	}
+
+	resp, err := http.ReadResponse(localBuf, req)
+	if err != nil {
+		log.Printf("failed to read response: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if err := resp.Write(stream); err != nil {
+		log.Printf("failed to write response: %v", err)
+		return
+	}
+
+	// WebSocket upgrade: protocol switches to raw framing after the 101 headers.
+	if resp.StatusCode == http.StatusSwitchingProtocols {
+		done := make(chan struct{}, 2)
+		go func() { io.Copy(localConn, streamBuf); done <- struct{}{} }()
+		go func() { io.Copy(stream, localBuf); done <- struct{}{} }()
+		<-done
+		return
+	}
+
+	log.Printf("%s %s %d %s", req.Method, req.URL.RequestURI(), resp.StatusCode, time.Since(start).Round(time.Millisecond))
 }
 
 // wsConn wraps *websocket.Conn as an io.ReadWriter so io.Copy can drive it.
