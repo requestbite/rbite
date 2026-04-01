@@ -12,8 +12,11 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"time"
 
 	"errors"
@@ -108,15 +111,16 @@ type ActiveSessionResponse struct {
 
 func printHelp() {
 	defaultServer := getEnv("TUNNEL_SERVER_URL", "http://localhost:8080")
-	fmt.Printf("RequestBite Tunnel v%s\n\n", Version)
+	fmt.Printf("RequestBite RBite CLI v%s\n\n", Version)
 	fmt.Println("Usage:")
 	fmt.Printf("  rbite [options]\n\n")
 	fmt.Println("Options:")
-	fmt.Printf("  -e, --expose int      Port to expose via ephemeral tunnel\n")
-	fmt.Printf("  -h, --help            Show help information\n")
-	fmt.Printf("  -r, --resume          Resume the last session if it has not expired\n")
-	fmt.Printf("  -s, --server string   Tunnel server URL (default %q)\n", defaultServer)
-	fmt.Printf("  -v, --version         Show version information\n")
+	fmt.Printf("  -e, --expose int        Port to expose via ephemeral tunnel\n")
+	fmt.Printf("  -h, --help              Show help information\n")
+	fmt.Printf("      --no-upgrade-check  Disable automatic upgrade check\n")
+	fmt.Printf("  -r, --resume            Resume the last session if it has not expired\n")
+	fmt.Printf("  -s, --server string     Tunnel server URL (default %q)\n", defaultServer)
+	fmt.Printf("  -v, --version           Show version information\n")
 	fmt.Println()
 }
 
@@ -126,11 +130,12 @@ func main() {
 
 	// Command line flags
 	var (
-		ephemeralPort int
-		showVersion   bool
-		showHelp      bool
-		resume        bool
-		serverURL     string
+		ephemeralPort   int
+		showVersion     bool
+		showHelp        bool
+		resume          bool
+		serverURL       string
+		noUpgradeCheck  bool
 	)
 	defaultServer := getEnv("TUNNEL_SERVER_URL", "http://localhost:8080")
 
@@ -144,6 +149,7 @@ func main() {
 	flag.BoolVar(&resume, "resume", false, "")
 	flag.StringVar(&serverURL, "s", defaultServer, "")
 	flag.StringVar(&serverURL, "server", defaultServer, "")
+	flag.BoolVar(&noUpgradeCheck, "no-upgrade-check", false, "")
 	flag.Usage = printHelp
 	flag.Parse()
 
@@ -163,6 +169,11 @@ func main() {
 	if showHelp {
 		printHelp()
 		os.Exit(0)
+	}
+
+	// Check for updates (unless disabled or running in development)
+	if !noUpgradeCheck && !isRunningInDevelopment() {
+		checkForUpdates()
 	}
 
 	// Validate flags
@@ -244,6 +255,106 @@ func main() {
 
 	// Fetch and print session stats once the tunnel is done.
 	printSessionStats(serverURL, clientID)
+}
+
+// isRunningInDevelopment detects if the binary is running in a development environment (e.g., with Air)
+func isRunningInDevelopment() bool {
+	if os.Getenv("AIR_WATCH") != "" || os.Getenv("AIR_TMP_DIR") != "" {
+		return true
+	}
+	execPath, err := os.Executable()
+	if err == nil && strings.Contains(execPath, "tmp") {
+		return true
+	}
+	if Version == "dev" {
+		return true
+	}
+	return false
+}
+
+// getRemoteVersion fetches the latest released version from the GitHub releases API.
+func getRemoteVersion() (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", "https://api.github.com/repos/requestbite/rbite/releases/latest", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+
+	var release struct {
+		TagName string `json:"tag_name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
+		return "", err
+	}
+
+	// Strip leading 'v' to match the Version variable format.
+	return strings.TrimPrefix(release.TagName, "v"), nil
+}
+
+// checkForUpdates checks if a new version is available and prompts the user to install it.
+func checkForUpdates() {
+	remoteVersion, err := getRemoteVersion()
+	if err != nil {
+		return
+	}
+
+	if remoteVersion == Version || remoteVersion == "" {
+		return
+	}
+
+	fmt.Printf("\n\033[33mThere is a new version of RequestBite RBite CLI available.\033[0m\n")
+	fmt.Printf("You're running v%s and the new version is v%s.\n\n", Version, remoteVersion)
+
+	if runtime.GOOS == "windows" {
+		fmt.Println("See https://github.com/requestbite/rbite/ for installation details.\n")
+		return
+	}
+
+	fmt.Print("Do you want to install (Y/N): ")
+	reader := bufio.NewReader(os.Stdin)
+	response, err := reader.ReadString('\n')
+	if err != nil {
+		fmt.Println("\nContinuing with current version...")
+		return
+	}
+
+	response = strings.TrimSpace(strings.ToLower(response))
+	if response == "y" || response == "yes" {
+		fmt.Println("\nInstalling update...")
+		if err := installUpdate(); err != nil {
+			fmt.Printf("\033[31mFailed to install update: %v\033[0m\n", err)
+			fmt.Println("Please visit https://github.com/requestbite/rbite/ for manual installation.\n")
+		} else {
+			fmt.Println("\033[32mUpdate installed successfully!\033[0m")
+			fmt.Println("Please restart rbite to use the new version.\n")
+			os.Exit(0)
+		}
+	} else {
+		fmt.Println("\nContinuing with current version...")
+	}
+	fmt.Println()
+}
+
+// installUpdate runs the installation script.
+func installUpdate() error {
+	cmd := exec.Command("bash", "-c", "curl -fsSL https://raw.githubusercontent.com/requestbite/rbite/main/install.sh | bash")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }
 
 func createEphemeralTunnel(serverURL string, port int, clientID string) (*CreateEphemeralResponse, error) {
