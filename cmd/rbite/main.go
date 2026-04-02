@@ -120,16 +120,16 @@ func buildDefaultServerURL() string {
 
 func printHelp() {
 	defaultServer := buildDefaultServerURL()
-	fmt.Printf("RequestBite RBite CLI v%s\n\n", Version)
+	fmt.Printf("\n\033[38;5;208mRequestBite RBite CLI\033[0m ⚡ v%s\n\n", Version)
 	fmt.Println("Usage:")
 	fmt.Printf("  rbite [options]\n\n")
 	fmt.Println("Options:")
-	fmt.Printf("  -e, --expose int        Port to expose via ephemeral tunnel\n")
-	fmt.Printf("  -h, --help              Show help information\n")
-	fmt.Printf("      --no-upgrade-check  Disable automatic upgrade check\n")
-	fmt.Printf("  -r, --resume            Resume the last session if it has not expired\n")
-	fmt.Printf("  -s, --server string     Tunnel server URL (default %q)\n", defaultServer)
-	fmt.Printf("  -v, --version           Show version information\n")
+	fmt.Printf("  -e, --ephemeral int         Port to expose via ephemeral tunnel\n")
+	fmt.Printf("  -h, --help                  Show help information\n")
+	fmt.Printf("      --no-upgrade-check      Disable automatic upgrade check\n")
+	fmt.Printf("  -r, --resume                Resume the last session if it has not expired\n")
+	fmt.Printf("      --tunnel-server string  Tunnel server URL (default %q)\n", defaultServer)
+	fmt.Printf("  -v, --version               Show version information\n")
 	fmt.Println()
 }
 
@@ -149,15 +149,14 @@ func main() {
 	defaultServer := buildDefaultServerURL()
 
 	flag.IntVar(&ephemeralPort, "e", 0, "")
-	flag.IntVar(&ephemeralPort, "expose", 0, "")
+	flag.IntVar(&ephemeralPort, "ephemeral", 0, "")
 	flag.BoolVar(&showVersion, "v", false, "")
 	flag.BoolVar(&showVersion, "version", false, "")
 	flag.BoolVar(&showHelp, "h", false, "")
 	flag.BoolVar(&showHelp, "help", false, "")
 	flag.BoolVar(&resume, "r", false, "")
 	flag.BoolVar(&resume, "resume", false, "")
-	flag.StringVar(&serverURL, "s", defaultServer, "")
-	flag.StringVar(&serverURL, "server", defaultServer, "")
+	flag.StringVar(&serverURL, "tunnel-server", defaultServer, "")
 	flag.BoolVar(&noUpgradeCheck, "no-upgrade-check", false, "")
 	flag.Usage = printHelp
 	flag.Parse()
@@ -187,10 +186,11 @@ func main() {
 
 	// Validate flags
 	if resume && ephemeralPort != 0 {
-		log.Fatal("Error: --resume and --expose cannot be used together")
+		log.Fatal("Error: --resume and --ephemeral cannot be used together")
 	}
 	if !resume && ephemeralPort == 0 {
-		log.Fatal("Error: -e/--expose flag is required to specify the localhost port")
+		printHelp()
+		os.Exit(0)
 	}
 
 	cfg, err := loadOrCreateConfig()
