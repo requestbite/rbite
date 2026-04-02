@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	_ "embed"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -27,6 +28,9 @@ import (
 	"github.com/joho/godotenv"
 	"gopkg.in/yaml.v3"
 )
+
+//go:embed tunnel-art.txt
+var tunnelArt string
 
 // Version information — set via ldflags at build time.
 var (
@@ -241,6 +245,7 @@ func main() {
 		if time.Until(expiresAt) > time.Duration(expiresIn)*time.Minute {
 			expiresIn++
 		}
+		fmt.Printf("\n%s\n", tunnelArt)
 		fmt.Printf("Ephemeral tunnel created. Expires at %s (in %d minutes).\n", expiresAt.Local().Format("15:04:05"), expiresIn)
 		fmt.Printf("> Internet endpoint: https://%s\n", tunnelURL)
 		fmt.Printf("> Local service: http://localhost:%d\n", ephemeralPort)
