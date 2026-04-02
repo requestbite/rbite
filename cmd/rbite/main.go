@@ -109,8 +109,17 @@ type ActiveSessionResponse struct {
 	Port      int       `json:"port"`
 }
 
+// buildDefaultServerURL constructs the default server URL from API_HOSTNAME (preferred)
+// or falls back to localhost for local development.
+func buildDefaultServerURL() string {
+	if h := getEnv("API_HOSTNAME", ""); h != "" {
+		return "https://" + h
+	}
+	return "http://localhost:8080"
+}
+
 func printHelp() {
-	defaultServer := getEnv("TUNNEL_SERVER_URL", "http://localhost:8080")
+	defaultServer := buildDefaultServerURL()
 	fmt.Printf("RequestBite RBite CLI v%s\n\n", Version)
 	fmt.Println("Usage:")
 	fmt.Printf("  rbite [options]\n\n")
@@ -137,7 +146,7 @@ func main() {
 		serverURL       string
 		noUpgradeCheck  bool
 	)
-	defaultServer := getEnv("TUNNEL_SERVER_URL", "http://localhost:8080")
+	defaultServer := buildDefaultServerURL()
 
 	flag.IntVar(&ephemeralPort, "e", 0, "")
 	flag.IntVar(&ephemeralPort, "expose", 0, "")
