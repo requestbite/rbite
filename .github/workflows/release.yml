@@ -32,6 +32,8 @@ jobs:
         run: make release
         env:
           VERSION: ${{ steps.version.outputs.VERSION }}
+          API_HOSTNAME: ${{ vars.API_HOSTNAME }}
+          DEBUG: ${{ vars.DEBUG }}
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
