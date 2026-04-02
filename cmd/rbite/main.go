@@ -233,8 +233,8 @@ func main() {
 			expiresIn++
 		}
 		fmt.Printf("Ephemeral tunnel created. Expires at %s (in %d minutes).\n", expiresAt.Local().Format("15:04:05"), expiresIn)
-		fmt.Printf("Internet endpoint: https://%s\n", tunnelURL)
-		fmt.Printf("Local service: http://localhost:%d\n", ephemeralPort)
+		fmt.Printf("> Internet endpoint: https://%s\n", tunnelURL)
+		fmt.Printf("> Local service: http://localhost:%d\n", ephemeralPort)
 		fmt.Printf("Press Ctrl+C to stop\n\n")
 	}
 
