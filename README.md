@@ -1,4 +1,8 @@
+[![Release](https://github.com/requestbite/rbite/actions/workflows/release.yml/badge.svg)](https://github.com/requestbite/rbite/actions/workflows/release.yml)
+
 # RequestBite RBite CLI
+
+## About
 
 This repository hosts the RequestBite RBite CLI which is the premier CLI app for
 the [RequestBite][rb] service. It's currently in active development and at the
@@ -137,7 +141,7 @@ to your local endpoint like so (example below):
 
 #### Session summary
 
-When your tunnel session expires or you close it manually by hitting `ctrl-C`,
+When your tunnel session expires or you close it manually by hitting `Ctrl-C`,
 you will get a summary of what was transferred like so:
 
 ```plaintext
