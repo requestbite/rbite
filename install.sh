@@ -317,10 +317,12 @@ install_binary() {
     fi
 
     sudo mkdir -p "$install_dir"
+    sudo rm -f "$install_dir/$BINARY_NAME"
     sudo cp "$BINARY_NAME" "$install_dir/"
     sudo chmod +x "$install_dir/$BINARY_NAME"
   else
     mkdir -p "$install_dir"
+    rm -f "$install_dir/$BINARY_NAME"
     cp "$BINARY_NAME" "$install_dir/"
     chmod +x "$install_dir/$BINARY_NAME"
   fi
