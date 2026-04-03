@@ -1,6 +1,6 @@
 [![Release](https://github.com/requestbite/rbite/actions/workflows/release.yml/badge.svg)](https://github.com/requestbite/rbite/actions/workflows/release.yml)
 
-# RequestBite RBite CLI
+# RequestBite RBite CLI (beta)
 
 ## About
 
@@ -30,7 +30,7 @@ The binary will be installed to `~/.local/bin` by default.
 To install the latest release to a custom directory, do like so:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/requestbite/rbite/main/install.sh | bash -s -- --prefix=$HOME/bin
+curl -fsSL https://raw.githubusercontent.com/requestbite/rbite/main/install.sh | bash -s -- --prefix $HOME/bin
 ```
 
 ### Install Older Version
@@ -38,7 +38,7 @@ curl -fsSL https://raw.githubusercontent.com/requestbite/rbite/main/install.sh |
 To install a specific version (in this example, version 0.3.1), do like so:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/requestbite/rbite/main/install.sh | bash -s -- --version=0.3.1
+curl -fsSL https://raw.githubusercontent.com/requestbite/rbite/main/install.sh | bash -s -- --version 0.3.1
 ```
 
 ### Manual Download
