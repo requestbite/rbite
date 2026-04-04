@@ -34,9 +34,10 @@ var tunnelArt string
 
 // Version information — set via ldflags at build time.
 var (
-	Version   = "dev"
-	BuildTime = "unknown"
-	GitCommit = "unknown"
+	Version             = "dev"
+	BuildTime           = "unknown"
+	GitCommit           = "unknown"
+	DefaultAPIHostname  = ""
 )
 
 type Config struct {
@@ -113,9 +114,13 @@ type ActiveSessionResponse struct {
 	Port      int       `json:"port"`
 }
 
-// buildDefaultServerURL constructs the default server URL from API_HOSTNAME (preferred)
-// or falls back to localhost for local development.
+// buildDefaultServerURL constructs the default server URL from API_HOSTNAME.
+// The compile-time value (set via ldflags) takes precedence, then the runtime
+// env var, then falls back to localhost for local development.
 func buildDefaultServerURL() string {
+	if DefaultAPIHostname != "" {
+		return "https://" + DefaultAPIHostname
+	}
 	if h := getEnv("API_HOSTNAME", ""); h != "" {
 		return "https://" + h
 	}
