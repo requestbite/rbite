@@ -1510,6 +1510,33 @@ func printRequestEvent(raw string) {
 		fmt.Println()
 	}
 
+	// ── Files (optional) ─────────────────────────────────────────────────────
+	if filesRaw, ok := evt["files"].([]interface{}); ok && len(filesRaw) > 0 {
+		sectionHeader("Files")
+		for i, f := range filesRaw {
+			file, ok := f.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if i > 0 {
+				fmt.Println()
+			}
+			if v, ok := file["fieldName"].(string); ok {
+				fmt.Printf("Field name:   %s\n", v)
+			}
+			if v, ok := file["fileName"].(string); ok {
+				fmt.Printf("File name:    %s\n", v)
+			}
+			if v, ok := file["contentType"].(string); ok {
+				fmt.Printf("Content type: %s\n", v)
+			}
+			if v, ok := file["size"].(float64); ok {
+				fmt.Printf("Size:         %d\n", int64(v))
+			}
+		}
+		fmt.Println()
+	}
+
 	// ── Body Payload (optional) ──────────────────────────────────────────────
 	if body, ok := evt["body"].(string); ok && body != "" {
 		sectionHeader("Body Payload")
