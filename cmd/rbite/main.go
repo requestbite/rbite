@@ -164,6 +164,7 @@ func printHelp() {
 	fmt.Printf("      --no-upgrade-check      Disable automatic upgrade check\n")
 	fmt.Printf("  -r, --resume                Resume the last session if it has not expired\n")
 	fmt.Printf("      --views-list            List active inspector views for the current account\n")
+	fmt.Printf("      --views-add [name]      Create a new inspector view (name is optional)\n")
 	fmt.Printf("      --views-tail [view ID]  Stream live requests for a view (prompts if no ID given)\n")
 	fmt.Printf("      --views-open [view ID]  Open a view's capture URL in the browser (prompts if no ID given)\n")
 	fmt.Printf("      --switch-accounts       Switch the active account\n")
@@ -189,6 +190,7 @@ func main() {
 		listViews      bool
 		tailViewID     string
 		openViewID     string
+		addViewName    string
 	)
 	defaultServer := buildDefaultServerURL()
 
@@ -207,12 +209,14 @@ func main() {
 	flag.BoolVar(&listViews, "views-list", false, "")
 	flag.StringVar(&tailViewID, "views-tail", "", "")
 	flag.StringVar(&openViewID, "views-open", "", "")
+	flag.StringVar(&addViewName, "views-add", "", "")
 	flag.Usage = printHelp
 
-	// Pre-scan os.Args to detect --views-tail / --views-open without a value,
-	// since flag.StringVar requires a value. Strip bare flags and record intent.
+	// Pre-scan os.Args to detect --views-tail / --views-open / --views-add without a
+	// value, since flag.StringVar requires a value. Strip bare flags and record intent.
 	viewTailNoID := false
 	viewOpenNoID := false
+	viewAddNoName := false
 	filteredArgs := make([]string, 0, len(os.Args)-1)
 	for i := 1; i < len(os.Args); i++ {
 		arg := os.Args[i]
@@ -229,6 +233,12 @@ func main() {
 				filteredArgs = append(filteredArgs, arg)
 			} else {
 				viewOpenNoID = true
+			}
+		case arg == "--views-add" || arg == "-views-add":
+			if hasValue {
+				filteredArgs = append(filteredArgs, arg)
+			} else {
+				viewAddNoName = true
 			}
 		default:
 			filteredArgs = append(filteredArgs, arg)
@@ -293,6 +303,16 @@ func main() {
 		}
 		if err := runOpenView(apiURL, id); err != nil {
 			log.Fatalf("Open view failed: %v", err)
+		}
+		os.Exit(0)
+	}
+
+	// Add view
+	if addViewName != "" || viewAddNoName {
+		apiURL := getEnv("REQUESTBITE_API_URL", serverURL)
+		name := addViewName // may be empty — runAddView handles that
+		if err := runAddView(apiURL, name); err != nil {
+			log.Fatalf("Add view failed: %v", err)
 		}
 		os.Exit(0)
 	}
@@ -1207,6 +1227,46 @@ func authedGet(apiURL, path, accessToken string, cfg *Config) (*http.Response, e
 	return resp, nil
 }
 
+// authedPost performs a POST request with a Bearer token, retrying once after a
+// token refresh if the server returns 401.
+func authedPost(apiURL, path, accessToken string, body []byte, cfg *Config) (*http.Response, error) {
+	doRequest := func(token string) (*http.Response, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		req, err := http.NewRequestWithContext(ctx, "POST", strings.TrimRight(apiURL, "/")+path, bytes.NewReader(body))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Content-Type", "application/json")
+		return http.DefaultClient.Do(req)
+	}
+
+	resp, err := doRequest(accessToken)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode == http.StatusUnauthorized && cfg.RefreshToken != "" {
+		resp.Body.Close()
+		clientID := getEnv("OAUTH_CLIENT_ID", "")
+		newAccess, newRefresh, refreshErr := refreshAccessToken(apiURL, cfg.RefreshToken, clientID)
+		if refreshErr != nil {
+			return nil, fmt.Errorf("session expired and token refresh failed: %w", refreshErr)
+		}
+		cfg.AccessToken = newAccess
+		if newRefresh != "" {
+			cfg.RefreshToken = newRefresh
+		}
+		if saveErr := saveConfig(cfg); saveErr != nil {
+			return nil, saveErr
+		}
+		return doRequest(newAccess)
+	}
+
+	return resp, nil
+}
+
 // runSwitchAccounts lists the user's accounts and lets them pick one to store as active.
 func runSwitchAccounts(apiURL string) error {
 	cfg, err := ensureAuthenticated(apiURL)
@@ -1399,6 +1459,52 @@ func runListViews(apiURL string) error {
 	fmt.Printf("ID:          %s\n", selected.ID)
 	fmt.Println()
 	fmt.Printf("To stream request info, run \"rbite --views-tail %s\"\n", selected.ID)
+	return nil
+}
+
+func runAddView(apiURL, name string) error {
+	cfg, err := ensureAuthenticated(apiURL)
+	if err != nil {
+		return err
+	}
+	if cfg.AccountID == "" {
+		return errors.New("no account selected; run rbite --switch-accounts first")
+	}
+
+	var body []byte
+	if name != "" {
+		body, err = json.Marshal(map[string]string{"name": name})
+		if err != nil {
+			return fmt.Errorf("could not encode request body: %w", err)
+		}
+	} else {
+		body = []byte("{}")
+	}
+
+	resp, err := authedPost(apiURL, "/v1/accounts/"+cfg.AccountID+"/inspector/views", cfg.AccessToken, body, cfg)
+	if err != nil {
+		return fmt.Errorf("create view request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		respBody, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("create view endpoint returned status %d: %s", resp.StatusCode, string(respBody))
+	}
+
+	var created struct {
+		ID         string `json:"id"`
+		Name       string `json:"name"`
+		CaptureURL string `json:"captureUrl"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		return fmt.Errorf("could not parse create view response: %w", err)
+	}
+
+	fmt.Printf("View with name %q created.\n", created.Name)
+	fmt.Printf(" - Send requests to it at %s\n", created.CaptureURL)
+	fmt.Printf(" - Open it in your browser by running \"rbite --views-open %s\"\n", created.ID)
+	fmt.Printf(" - Tail it in your terminal by running \"rbite --views-tail %s\"\n", created.ID)
 	return nil
 }
 
