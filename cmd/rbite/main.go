@@ -21,6 +21,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -162,7 +163,9 @@ func printHelp() {
 	fmt.Printf("      --login                 Log in via browser (OIDC)\n")
 	fmt.Printf("      --no-upgrade-check      Disable automatic upgrade check\n")
 	fmt.Printf("  -r, --resume                Resume the last session if it has not expired\n")
+	fmt.Printf("      --list-views            List active inspector views for the current account\n")
 	fmt.Printf("      --switch-accounts       Switch the active account\n")
+	fmt.Printf("      --tail-view string      Stream live requests for a view ID\n")
 	fmt.Printf("      --tunnel-server string  Tunnel server URL (default %q)\n", defaultServer)
 	fmt.Printf("  -v, --version               Show version information\n")
 	fmt.Println()
@@ -174,14 +177,16 @@ func main() {
 
 	// Command line flags
 	var (
-		ephemeralPort   int
-		showVersion     bool
-		showHelp        bool
-		resume          bool
-		serverURL       string
-		noUpgradeCheck  bool
-		loginMode       bool
-		switchAccounts  bool
+		ephemeralPort  int
+		showVersion    bool
+		showHelp       bool
+		resume         bool
+		serverURL      string
+		noUpgradeCheck bool
+		loginMode      bool
+		switchAccounts bool
+		listViews      bool
+		tailViewID     string
 	)
 	defaultServer := buildDefaultServerURL()
 
@@ -197,6 +202,8 @@ func main() {
 	flag.BoolVar(&noUpgradeCheck, "no-upgrade-check", false, "")
 	flag.BoolVar(&loginMode, "login", false, "")
 	flag.BoolVar(&switchAccounts, "switch-accounts", false, "")
+	flag.BoolVar(&listViews, "list-views", false, "")
+	flag.StringVar(&tailViewID, "tail-view", "", "")
 	flag.Usage = printHelp
 	flag.Parse()
 
@@ -223,6 +230,24 @@ func main() {
 		apiURL := getEnv("REQUESTBITE_API_URL", serverURL)
 		if err := runLogin(apiURL); err != nil {
 			log.Fatalf("Login failed: %v", err)
+		}
+		os.Exit(0)
+	}
+
+	// Tail view
+	if tailViewID != "" {
+		apiURL := getEnv("REQUESTBITE_API_URL", serverURL)
+		if err := runTailView(apiURL, tailViewID); err != nil {
+			log.Fatalf("Tail view failed: %v", err)
+		}
+		os.Exit(0)
+	}
+
+	// List views
+	if listViews {
+		apiURL := getEnv("REQUESTBITE_API_URL", serverURL)
+		if err := runListViews(apiURL); err != nil {
+			log.Fatalf("List views failed: %v", err)
 		}
 		os.Exit(0)
 	}
@@ -1187,4 +1212,276 @@ func runSwitchAccounts(apiURL string) error {
 		fmt.Printf("Active account set to: %s\n", selected.Name)
 		return nil
 	}
+}
+
+// runListViews lists active inspector views for the current account and shows details for a chosen one.
+func runListViews(apiURL string) error {
+	cfg, err := ensureAuthenticated(apiURL)
+	if err != nil {
+		return err
+	}
+	if cfg.AccountID == "" {
+		return errors.New("no account selected; run rbite --switch-accounts first")
+	}
+
+	resp, err := authedGet(apiURL, "/v1/accounts/"+cfg.AccountID+"/inspector/views", cfg.AccessToken, cfg)
+	if err != nil {
+		return fmt.Errorf("views request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("views endpoint returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var payload struct {
+		Views []struct {
+			ID         string `json:"id"`
+			Name       string `json:"name"`
+			IsActive   bool   `json:"isActive"`
+			CaptureURL string `json:"captureUrl"`
+		} `json:"views"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return fmt.Errorf("could not parse views response: %w", err)
+	}
+
+	// Filter to active views only.
+	var active []struct {
+		ID         string
+		Name       string
+		CaptureURL string
+	}
+	for _, v := range payload.Views {
+		if v.IsActive {
+			active = append(active, struct {
+				ID         string
+				Name       string
+				CaptureURL string
+			}{v.ID, v.Name, v.CaptureURL})
+		}
+	}
+
+	if len(active) == 0 {
+		fmt.Println("No active views found for this account.")
+		return nil
+	}
+
+	for i, v := range active {
+		fmt.Printf("  %d. %s\n", i+1, v.Name)
+	}
+	fmt.Println()
+
+	reader := bufio.NewReader(os.Stdin)
+	var choice int
+	for {
+		fmt.Printf("Get details about view (1-%d): ", len(active))
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return fmt.Errorf("could not read input: %w", err)
+		}
+		if _, err := fmt.Sscanf(strings.TrimSpace(line), "%d", &choice); err != nil || choice < 1 || choice > len(active) {
+			fmt.Printf("Please enter a number between 1 and %d.\n", len(active))
+			continue
+		}
+		break
+	}
+
+	selected := active[choice-1]
+	fmt.Println()
+	fmt.Printf("Name:        %s\n", selected.Name)
+	fmt.Printf("Capture URL: %s\n", selected.CaptureURL)
+	fmt.Printf("ID:          %s\n", selected.ID)
+	fmt.Println()
+	fmt.Printf("To stream request info, run \"rbite --tail-view %s\"\n", selected.ID)
+	return nil
+}
+
+// ANSI colour constants used by the JSON pretty-printer.
+const (
+	ansiReset   = "\033[0m"
+	ansiBold    = "\033[1m"
+	ansiCyan    = "\033[36m"
+	ansiGreen   = "\033[32m"
+	ansiYellow  = "\033[33m"
+	ansiMagenta = "\033[35m"
+	ansiRed     = "\033[31m"
+	ansiBlue    = "\033[34m"
+	ansiGray    = "\033[90m"
+)
+
+// colorizeJSON unmarshals raw JSON and returns an indented, coloured string.
+func colorizeJSON(raw string) string {
+	var v interface{}
+	if err := json.Unmarshal([]byte(raw), &v); err != nil {
+		return raw // not valid JSON — return as-is
+	}
+	return colorizeValue(v, 0)
+}
+
+func colorizeValue(v interface{}, depth int) string {
+	pad := strings.Repeat("  ", depth)
+	inner := strings.Repeat("  ", depth+1)
+
+	switch val := v.(type) {
+	case map[string]interface{}:
+		if len(val) == 0 {
+			return "{}"
+		}
+		keys := make([]string, 0, len(val))
+		for k := range val {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		var sb strings.Builder
+		sb.WriteString("{\n")
+		for i, k := range keys {
+			sb.WriteString(inner)
+			sb.WriteString(ansiCyan + `"` + k + `"` + ansiReset)
+			sb.WriteString(": ")
+			sb.WriteString(colorizeValue(val[k], depth+1))
+			if i < len(keys)-1 {
+				sb.WriteByte(',')
+			}
+			sb.WriteByte('\n')
+		}
+		sb.WriteString(pad + "}")
+		return sb.String()
+
+	case []interface{}:
+		if len(val) == 0 {
+			return "[]"
+		}
+		var sb strings.Builder
+		sb.WriteString("[\n")
+		for i, item := range val {
+			sb.WriteString(inner)
+			sb.WriteString(colorizeValue(item, depth+1))
+			if i < len(val)-1 {
+				sb.WriteByte(',')
+			}
+			sb.WriteByte('\n')
+		}
+		sb.WriteString(pad + "]")
+		return sb.String()
+
+	case string:
+		return ansiGreen + `"` + val + `"` + ansiReset
+
+	case float64:
+		if val == float64(int64(val)) {
+			return ansiYellow + fmt.Sprintf("%d", int64(val)) + ansiReset
+		}
+		return ansiYellow + fmt.Sprintf("%g", val) + ansiReset
+
+	case bool:
+		return ansiMagenta + fmt.Sprintf("%t", val) + ansiReset
+
+	case nil:
+		return ansiRed + "null" + ansiReset
+
+	default:
+		return fmt.Sprintf("%v", val)
+	}
+}
+
+// runTailView streams SSE events from the inspector view and pretty-prints each payload.
+func runTailView(apiURL, viewID string) error {
+	cfg, err := ensureAuthenticated(apiURL)
+	if err != nil {
+		return err
+	}
+	if cfg.AccountID == "" {
+		return errors.New("no account selected; run rbite --switch-accounts first")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt)
+	go func() {
+		<-sigCh
+		fmt.Println()
+		cancel()
+	}()
+
+	fmt.Printf("Tailing view %s (press Ctrl+C to stop)...\n\n", viewID)
+
+	path := "/v1/accounts/" + cfg.AccountID + "/inspector/views/" + viewID + "/sse"
+	return streamSSE(ctx, apiURL, path, cfg)
+}
+
+// streamSSE connects to an SSE endpoint and prints each data event as coloured JSON.
+// It transparently refreshes the access token and reconnects once on a 401.
+func streamSSE(ctx context.Context, apiURL, path string, cfg *Config) error {
+	sseURL := strings.TrimRight(apiURL, "/") + path
+
+	req, err := http.NewRequestWithContext(ctx, "GET", sseURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+cfg.AccessToken)
+	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set("Cache-Control", "no-cache")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
+		return fmt.Errorf("SSE request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Transparent token refresh on 401.
+	if resp.StatusCode == http.StatusUnauthorized && cfg.RefreshToken != "" {
+		resp.Body.Close()
+		clientID := getEnv("OAUTH_CLIENT_ID", "")
+		newAccess, newRefresh, refreshErr := refreshAccessToken(apiURL, cfg.RefreshToken, clientID)
+		if refreshErr != nil {
+			return fmt.Errorf("session expired and token refresh failed: %w", refreshErr)
+		}
+		cfg.AccessToken = newAccess
+		if newRefresh != "" {
+			cfg.RefreshToken = newRefresh
+		}
+		if saveErr := saveConfig(cfg); saveErr != nil {
+			return saveErr
+		}
+		return streamSSE(ctx, apiURL, path, cfg)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("SSE endpoint returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		if ctx.Err() != nil {
+			return nil
+		}
+		line := scanner.Text()
+
+		// Skip comments and non-data lines.
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if data == "" {
+			continue
+		}
+
+		ts := time.Now().Format("15:04:05")
+		fmt.Printf("%s--- %s ---%s\n", ansiGray, ts, ansiReset)
+		fmt.Println(colorizeJSON(data))
+		fmt.Println()
+	}
+
+	if err := scanner.Err(); err != nil && ctx.Err() == nil {
+		return fmt.Errorf("SSE stream error: %w", err)
+	}
+	return nil
 }
