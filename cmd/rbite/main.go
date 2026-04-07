@@ -162,6 +162,7 @@ func printHelp() {
 	fmt.Printf("      --login                 Log in via browser (OIDC)\n")
 	fmt.Printf("      --no-upgrade-check      Disable automatic upgrade check\n")
 	fmt.Printf("  -r, --resume                Resume the last session if it has not expired\n")
+	fmt.Printf("      --switch-accounts       Switch the active account\n")
 	fmt.Printf("      --tunnel-server string  Tunnel server URL (default %q)\n", defaultServer)
 	fmt.Printf("  -v, --version               Show version information\n")
 	fmt.Println()
@@ -173,13 +174,14 @@ func main() {
 
 	// Command line flags
 	var (
-		ephemeralPort  int
-		showVersion    bool
-		showHelp       bool
-		resume         bool
-		serverURL      string
-		noUpgradeCheck bool
-		loginMode      bool
+		ephemeralPort   int
+		showVersion     bool
+		showHelp        bool
+		resume          bool
+		serverURL       string
+		noUpgradeCheck  bool
+		loginMode       bool
+		switchAccounts  bool
 	)
 	defaultServer := buildDefaultServerURL()
 
@@ -194,6 +196,7 @@ func main() {
 	flag.StringVar(&serverURL, "tunnel-server", defaultServer, "")
 	flag.BoolVar(&noUpgradeCheck, "no-upgrade-check", false, "")
 	flag.BoolVar(&loginMode, "login", false, "")
+	flag.BoolVar(&switchAccounts, "switch-accounts", false, "")
 	flag.Usage = printHelp
 	flag.Parse()
 
@@ -220,6 +223,15 @@ func main() {
 		apiURL := getEnv("REQUESTBITE_API_URL", serverURL)
 		if err := runLogin(apiURL); err != nil {
 			log.Fatalf("Login failed: %v", err)
+		}
+		os.Exit(0)
+	}
+
+	// Switch accounts
+	if switchAccounts {
+		apiURL := getEnv("REQUESTBITE_API_URL", serverURL)
+		if err := runSwitchAccounts(apiURL); err != nil {
+			log.Fatalf("Switch accounts failed: %v", err)
 		}
 		os.Exit(0)
 	}
@@ -987,4 +999,192 @@ func fetchFirstAccount(apiURL, accessToken string) (id, name string, err error) 
 		return "", "", errors.New("no accounts found for this user")
 	}
 	return body.Accounts[0].ID, body.Accounts[0].Name, nil
+}
+
+// refreshAccessToken uses a refresh token to obtain a new access token (and possibly a new refresh token).
+func refreshAccessToken(apiURL, refreshToken, clientID string) (accessToken, newRefreshToken string, err error) {
+	params := url.Values{}
+	params.Set("grant_type", "refresh_token")
+	params.Set("refresh_token", refreshToken)
+	params.Set("client_id", clientID)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", strings.TrimRight(apiURL, "/")+"/oauth2/token", strings.NewReader(params.Encode()))
+	if err != nil {
+		return "", "", err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", "", fmt.Errorf("token refresh request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", "", fmt.Errorf("token refresh returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var tokenResp struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		Error        string `json:"error"`
+		ErrorDesc    string `json:"error_description"`
+	}
+	if err := json.Unmarshal(body, &tokenResp); err != nil {
+		return "", "", fmt.Errorf("could not parse token refresh response: %w", err)
+	}
+	if tokenResp.Error != "" {
+		return "", "", fmt.Errorf("token refresh error %q: %s", tokenResp.Error, tokenResp.ErrorDesc)
+	}
+	if tokenResp.AccessToken == "" {
+		return "", "", errors.New("token refresh response did not contain an access_token")
+	}
+	return tokenResp.AccessToken, tokenResp.RefreshToken, nil
+}
+
+// ensureAuthenticated ensures the config has a valid access token, refreshing or
+// prompting login as needed. Returns the (possibly updated) config and API URL.
+func ensureAuthenticated(apiURL string) (*Config, error) {
+	cfg, err := loadOrCreateConfig()
+	if err != nil {
+		return nil, err
+	}
+
+	// No credentials at all — ask user to log in.
+	if cfg.AccessToken == "" && cfg.RefreshToken == "" {
+		fmt.Print("You are not logged in. Do you want to log in? (Y/n): ")
+		reader := bufio.NewReader(os.Stdin)
+		response, err := reader.ReadString('\n')
+		if err != nil || strings.TrimSpace(strings.ToLower(response)) == "n" {
+			return nil, errors.New("login required")
+		}
+		if err := runLogin(apiURL); err != nil {
+			return nil, err
+		}
+		// Reload config after login.
+		return loadOrCreateConfig()
+	}
+
+	// Have a refresh token but no access token — refresh silently.
+	if cfg.AccessToken == "" && cfg.RefreshToken != "" {
+		clientID := getEnv("OAUTH_CLIENT_ID", "")
+		newAccess, newRefresh, err := refreshAccessToken(apiURL, cfg.RefreshToken, clientID)
+		if err != nil {
+			return nil, fmt.Errorf("could not refresh credentials: %w", err)
+		}
+		cfg.AccessToken = newAccess
+		if newRefresh != "" {
+			cfg.RefreshToken = newRefresh
+		}
+		if err := saveConfig(cfg); err != nil {
+			return nil, err
+		}
+		return cfg, nil
+	}
+
+	return cfg, nil
+}
+
+// authedGet performs a GET request with a Bearer token, retrying once after a
+// token refresh if the server returns 401.
+func authedGet(apiURL, path, accessToken string, cfg *Config) (*http.Response, error) {
+	doRequest := func(token string) (*http.Response, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		req, err := http.NewRequestWithContext(ctx, "GET", strings.TrimRight(apiURL, "/")+path, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+token)
+		return http.DefaultClient.Do(req)
+	}
+
+	resp, err := doRequest(accessToken)
+	if err != nil {
+		return nil, err
+	}
+
+	if resp.StatusCode == http.StatusUnauthorized && cfg.RefreshToken != "" {
+		resp.Body.Close()
+		clientID := getEnv("OAUTH_CLIENT_ID", "")
+		newAccess, newRefresh, refreshErr := refreshAccessToken(apiURL, cfg.RefreshToken, clientID)
+		if refreshErr != nil {
+			return nil, fmt.Errorf("session expired and token refresh failed: %w", refreshErr)
+		}
+		cfg.AccessToken = newAccess
+		if newRefresh != "" {
+			cfg.RefreshToken = newRefresh
+		}
+		if saveErr := saveConfig(cfg); saveErr != nil {
+			return nil, saveErr
+		}
+		return doRequest(newAccess)
+	}
+
+	return resp, nil
+}
+
+// runSwitchAccounts lists the user's accounts and lets them pick one to store as active.
+func runSwitchAccounts(apiURL string) error {
+	cfg, err := ensureAuthenticated(apiURL)
+	if err != nil {
+		return err
+	}
+
+	resp, err := authedGet(apiURL, "/v1/accounts", cfg.AccessToken, cfg)
+	if err != nil {
+		return fmt.Errorf("accounts request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("accounts endpoint returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var payload struct {
+		Accounts []struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"accounts"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+		return fmt.Errorf("could not parse accounts response: %w", err)
+	}
+	if len(payload.Accounts) == 0 {
+		return errors.New("no accounts found for this user")
+	}
+
+	fmt.Println("Pick one of your accounts:")
+	fmt.Println()
+	for i, a := range payload.Accounts {
+		fmt.Printf("  %d. %s\n", i+1, a.Name)
+	}
+	fmt.Println()
+
+	reader := bufio.NewReader(os.Stdin)
+	for {
+		fmt.Printf("Enter number (1-%d): ", len(payload.Accounts))
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return fmt.Errorf("could not read input: %w", err)
+		}
+		line = strings.TrimSpace(line)
+		var choice int
+		if _, err := fmt.Sscanf(line, "%d", &choice); err != nil || choice < 1 || choice > len(payload.Accounts) {
+			fmt.Printf("Please enter a number between 1 and %d.\n", len(payload.Accounts))
+			continue
+		}
+		selected := payload.Accounts[choice-1]
+		cfg.AccountID = selected.ID
+		if err := saveConfig(cfg); err != nil {
+			return err
+		}
+		fmt.Printf("Active account set to: %s\n", selected.Name)
+		return nil
+	}
 }
