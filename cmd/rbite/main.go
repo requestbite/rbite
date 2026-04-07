@@ -48,6 +48,7 @@ type Config struct {
 	ClientID     string `yaml:"clientId"`
 	AccessToken  string `yaml:"accessToken,omitempty"`
 	RefreshToken string `yaml:"refreshToken,omitempty"`
+	AccountID    string `yaml:"accountId,omitempty"`
 }
 
 // configPath returns the absolute path to ~/.config/rbite/config.yaml.
@@ -895,10 +896,95 @@ func runLogin(apiURL string) error {
 	}
 	cfg.AccessToken = accessToken
 	cfg.RefreshToken = refreshToken
+
+	// Fetch user info.
+	userInfo, err := fetchUserInfo(apiURL, accessToken)
+	if err != nil {
+		return err
+	}
+
+	// Fetch accounts and pick the first one.
+	accountID, accountName, err := fetchFirstAccount(apiURL, accessToken)
+	if err != nil {
+		return err
+	}
+	cfg.AccountID = accountID
+
 	if err := saveConfig(cfg); err != nil {
 		return err
 	}
 
-	fmt.Println("Login successful. Access token stored in ~/.config/rbite/config.yaml")
+	fmt.Println("Login successful.")
+	if userInfo.GivenName != "" && userInfo.FamilyName != "" {
+		fmt.Printf("Hello %s %s!\n", userInfo.GivenName, userInfo.FamilyName)
+	}
+	fmt.Printf("RBite now has access to your account: %s.\n  To switch account, use the --switch-account parameter.\n", accountName)
 	return nil
+}
+
+type userInfoResponse struct {
+	GivenName  string `json:"given_name"`
+	FamilyName string `json:"family_name"`
+}
+
+func fetchUserInfo(apiURL, accessToken string) (*userInfoResponse, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", strings.TrimRight(apiURL, "/")+"/oauth2/userinfo", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("userinfo request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("userinfo returned status %d", resp.StatusCode)
+	}
+
+	var info userInfoResponse
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		return nil, fmt.Errorf("could not parse userinfo response: %w", err)
+	}
+	return &info, nil
+}
+
+func fetchFirstAccount(apiURL, accessToken string) (id, name string, err error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", strings.TrimRight(apiURL, "/")+"/v1/accounts", nil)
+	if err != nil {
+		return "", "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", "", fmt.Errorf("accounts request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", "", fmt.Errorf("accounts endpoint returned status %d", resp.StatusCode)
+	}
+
+	var body struct {
+		Accounts []struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+		} `json:"accounts"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		return "", "", fmt.Errorf("could not parse accounts response: %w", err)
+	}
+	if len(body.Accounts) == 0 {
+		return "", "", errors.New("no accounts found for this user")
+	}
+	return body.Accounts[0].ID, body.Accounts[0].Name, nil
 }
