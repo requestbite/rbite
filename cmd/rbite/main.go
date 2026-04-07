@@ -1386,6 +1386,95 @@ func colorizeValue(v interface{}, depth int) string {
 	}
 }
 
+// printRequestEvent formats a single SSE data payload into labelled sections.
+func printRequestEvent(raw string) {
+	var evt map[string]interface{}
+	if err := json.Unmarshal([]byte(raw), &evt); err != nil {
+		// Not valid JSON — fall back to raw output.
+		fmt.Println(raw)
+		return
+	}
+
+	sectionHeader := func(title string) {
+		fmt.Printf("%s%s%s\n", ansiBold, title, ansiReset)
+		fmt.Println(strings.Repeat("=", len(title)))
+	}
+
+	// Skip empty/keepalive events that carry no request data.
+	addr, hasAddr := evt["remoteAddr"].(string)
+	if !hasAddr || addr == "" {
+		return
+	}
+
+	ts := time.Now().Format("15:04:05")
+	fmt.Printf("%s--- %s ---%s\n\n", ansiGray, ts, ansiReset)
+
+	// ── Request Details ──────────────────────────────────────────────────────
+	sectionHeader("Request Details")
+	fmt.Printf("Host:    %s\n", addr)
+	if method, ok := evt["method"].(string); ok && method != "" {
+		fmt.Printf("Method:  %s\n", method)
+	}
+	fmt.Println()
+
+	// ── Request Headers ──────────────────────────────────────────────────────
+	sectionHeader("Request Headers")
+	if hdrs, ok := evt["headers"].(map[string]interface{}); ok && len(hdrs) > 0 {
+		// Find longest key for alignment.
+		maxLen := 0
+		keys := make([]string, 0, len(hdrs))
+		for k := range hdrs {
+			keys = append(keys, k)
+			if len(k) > maxLen {
+				maxLen = len(k)
+			}
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			v := fmt.Sprintf("%v", hdrs[k])
+			fmt.Printf("%-*s  %s\n", maxLen, k, v)
+		}
+	}
+	fmt.Println()
+
+	// ── Query-string Parameters (optional) ──────────────────────────────────
+	if qs, ok := evt["queryString"].(string); ok && qs != "{}" && qs != "" {
+		sectionHeader("Query-string Parameters")
+		var qsMap map[string]interface{}
+		if err := json.Unmarshal([]byte(qs), &qsMap); err == nil && len(qsMap) > 0 {
+			maxLen := 0
+			keys := make([]string, 0, len(qsMap))
+			for k := range qsMap {
+				keys = append(keys, k)
+				if len(k) > maxLen {
+					maxLen = len(k)
+				}
+			}
+			sort.Strings(keys)
+			for _, k := range keys {
+				v := fmt.Sprintf("%v", qsMap[k])
+				fmt.Printf("%-*s  %s\n", maxLen, k, v)
+			}
+		} else {
+			fmt.Println(qs)
+		}
+		fmt.Println()
+	}
+
+	// ── Body Payload (optional) ──────────────────────────────────────────────
+	if body, ok := evt["body"].(string); ok && body != "" {
+		sectionHeader("Body Payload")
+		// Try to pretty-print as JSON; fall back to plain text.
+		var bodyVal interface{}
+		if err := json.Unmarshal([]byte(body), &bodyVal); err == nil {
+			fmt.Println(colorizeValue(bodyVal, 0))
+		} else {
+			fmt.Println(body)
+		}
+		fmt.Println()
+	}
+}
+
 // runTailView streams SSE events from the inspector view and pretty-prints each payload.
 func runTailView(apiURL, viewID string) error {
 	cfg, err := ensureAuthenticated(apiURL)
@@ -1474,10 +1563,7 @@ func streamSSE(ctx context.Context, apiURL, path string, cfg *Config) error {
 			continue
 		}
 
-		ts := time.Now().Format("15:04:05")
-		fmt.Printf("%s--- %s ---%s\n", ansiGray, ts, ansiReset)
-		fmt.Println(colorizeJSON(data))
-		fmt.Println()
+		printRequestEvent(data)
 	}
 
 	if err := scanner.Err(); err != nil && ctx.Err() == nil {
