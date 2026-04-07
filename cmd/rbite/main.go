@@ -1431,7 +1431,17 @@ func printRequestEvent(raw string) {
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
-			v := fmt.Sprintf("%v", hdrs[k])
+			var v string
+			switch val := hdrs[k].(type) {
+			case []interface{}:
+				parts := make([]string, len(val))
+				for i, item := range val {
+					parts[i] = fmt.Sprintf("%v", item)
+				}
+				v = strings.Join(parts, ", ")
+			default:
+				v = fmt.Sprintf("%v", val)
+			}
 			fmt.Printf("%-*s  %s\n", maxLen, k, v)
 		}
 	}
