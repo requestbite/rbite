@@ -163,9 +163,10 @@ func printHelp() {
 	fmt.Printf("      --login                 Log in via browser (OIDC)\n")
 	fmt.Printf("      --no-upgrade-check      Disable automatic upgrade check\n")
 	fmt.Printf("  -r, --resume                Resume the last session if it has not expired\n")
-	fmt.Printf("      --list-views            List active inspector views for the current account\n")
+	fmt.Printf("      --views-list            List active inspector views for the current account\n")
+	fmt.Printf("      --views-tail [view ID]  Stream live requests for a view (prompts if no ID given)\n")
+	fmt.Printf("      --views-open [view ID]  Open a view's capture URL in the browser (prompts if no ID given)\n")
 	fmt.Printf("      --switch-accounts       Switch the active account\n")
-	fmt.Printf("      --tail-view string      Stream live requests for a view ID\n")
 	fmt.Printf("      --tunnel-server string  Tunnel server URL (default %q)\n", defaultServer)
 	fmt.Printf("  -v, --version               Show version information\n")
 	fmt.Println()
@@ -187,6 +188,7 @@ func main() {
 		switchAccounts bool
 		listViews      bool
 		tailViewID     string
+		openViewID     string
 	)
 	defaultServer := buildDefaultServerURL()
 
@@ -202,10 +204,37 @@ func main() {
 	flag.BoolVar(&noUpgradeCheck, "no-upgrade-check", false, "")
 	flag.BoolVar(&loginMode, "login", false, "")
 	flag.BoolVar(&switchAccounts, "switch-accounts", false, "")
-	flag.BoolVar(&listViews, "list-views", false, "")
-	flag.StringVar(&tailViewID, "tail-view", "", "")
+	flag.BoolVar(&listViews, "views-list", false, "")
+	flag.StringVar(&tailViewID, "views-tail", "", "")
+	flag.StringVar(&openViewID, "views-open", "", "")
 	flag.Usage = printHelp
-	flag.Parse()
+
+	// Pre-scan os.Args to detect --views-tail / --views-open without a value,
+	// since flag.StringVar requires a value. Strip bare flags and record intent.
+	viewTailNoID := false
+	viewOpenNoID := false
+	filteredArgs := make([]string, 0, len(os.Args)-1)
+	for i := 1; i < len(os.Args); i++ {
+		arg := os.Args[i]
+		hasValue := i+1 < len(os.Args) && !strings.HasPrefix(os.Args[i+1], "-")
+		switch {
+		case arg == "--views-tail" || arg == "-views-tail":
+			if hasValue {
+				filteredArgs = append(filteredArgs, arg)
+			} else {
+				viewTailNoID = true
+			}
+		case arg == "--views-open" || arg == "-views-open":
+			if hasValue {
+				filteredArgs = append(filteredArgs, arg)
+			} else {
+				viewOpenNoID = true
+			}
+		default:
+			filteredArgs = append(filteredArgs, arg)
+		}
+	}
+	flag.CommandLine.Parse(filteredArgs)
 
 	// Show version
 	if showVersion {
@@ -235,10 +264,35 @@ func main() {
 	}
 
 	// Tail view
-	if tailViewID != "" {
+	if tailViewID != "" || viewTailNoID {
 		apiURL := getEnv("REQUESTBITE_API_URL", serverURL)
-		if err := runTailView(apiURL, tailViewID); err != nil {
+		id := tailViewID
+		if id == "" {
+			var err error
+			id, err = selectView(apiURL, "tail")
+			if err != nil {
+				log.Fatalf("View selection failed: %v", err)
+			}
+		}
+		if err := runTailView(apiURL, id); err != nil {
 			log.Fatalf("Tail view failed: %v", err)
+		}
+		os.Exit(0)
+	}
+
+	// Open view in browser
+	if openViewID != "" || viewOpenNoID {
+		apiURL := getEnv("REQUESTBITE_API_URL", serverURL)
+		id := openViewID
+		if id == "" {
+			var err error
+			id, err = selectView(apiURL, "open")
+			if err != nil {
+				log.Fatalf("View selection failed: %v", err)
+			}
+		}
+		if err := runOpenView(apiURL, id); err != nil {
+			log.Fatalf("Open view failed: %v", err)
 		}
 		os.Exit(0)
 	}
@@ -1215,24 +1269,24 @@ func runSwitchAccounts(apiURL string) error {
 }
 
 // runListViews lists active inspector views for the current account and shows details for a chosen one.
-func runListViews(apiURL string) error {
-	cfg, err := ensureAuthenticated(apiURL)
-	if err != nil {
-		return err
-	}
-	if cfg.AccountID == "" {
-		return errors.New("no account selected; run rbite --switch-accounts first")
-	}
+// activeView holds the fields we care about for an active inspector view.
+type activeView struct {
+	ID         string
+	Name       string
+	CaptureURL string
+}
 
+// fetchActiveViews retrieves the list of active inspector views for the account.
+func fetchActiveViews(apiURL string, cfg *Config) ([]activeView, error) {
 	resp, err := authedGet(apiURL, "/v1/accounts/"+cfg.AccountID+"/inspector/views", cfg.AccessToken, cfg)
 	if err != nil {
-		return fmt.Errorf("views request failed: %w", err)
+		return nil, fmt.Errorf("views request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("views endpoint returned status %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("views endpoint returned status %d: %s", resp.StatusCode, string(body))
 	}
 
 	var payload struct {
@@ -1244,23 +1298,73 @@ func runListViews(apiURL string) error {
 		} `json:"views"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
-		return fmt.Errorf("could not parse views response: %w", err)
+		return nil, fmt.Errorf("could not parse views response: %w", err)
 	}
 
-	// Filter to active views only.
-	var active []struct {
-		ID         string
-		Name       string
-		CaptureURL string
-	}
+	var active []activeView
 	for _, v := range payload.Views {
 		if v.IsActive {
-			active = append(active, struct {
-				ID         string
-				Name       string
-				CaptureURL string
-			}{v.ID, v.Name, v.CaptureURL})
+			active = append(active, activeView{v.ID, v.Name, v.CaptureURL})
 		}
+	}
+	return active, nil
+}
+
+// selectView lists active views and prompts the user to pick one, returning its ID.
+// verb is used in the prompt, e.g. "tail" or "open".
+func selectView(apiURL, verb string) (string, error) {
+	cfg, err := ensureAuthenticated(apiURL)
+	if err != nil {
+		return "", err
+	}
+	if cfg.AccountID == "" {
+		return "", errors.New("no account selected; run rbite --switch-accounts first")
+	}
+
+	active, err := fetchActiveViews(apiURL, cfg)
+	if err != nil {
+		return "", err
+	}
+
+	if len(active) == 0 {
+		return "", errors.New("no active views found for this account")
+	}
+
+	for i, v := range active {
+		fmt.Printf("  %d. %s\n", i+1, v.Name)
+	}
+	fmt.Println()
+
+	reader := bufio.NewReader(os.Stdin)
+	var choice int
+	for {
+		fmt.Printf("Select a view to %s (1-%d): ", verb, len(active))
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return "", fmt.Errorf("could not read input: %w", err)
+		}
+		if _, err := fmt.Sscanf(strings.TrimSpace(line), "%d", &choice); err != nil || choice < 1 || choice > len(active) {
+			fmt.Printf("Please enter a number between 1 and %d.\n", len(active))
+			continue
+		}
+		break
+	}
+
+	return active[choice-1].ID, nil
+}
+
+func runListViews(apiURL string) error {
+	cfg, err := ensureAuthenticated(apiURL)
+	if err != nil {
+		return err
+	}
+	if cfg.AccountID == "" {
+		return errors.New("no account selected; run rbite --switch-accounts first")
+	}
+
+	active, err := fetchActiveViews(apiURL, cfg)
+	if err != nil {
+		return err
 	}
 
 	if len(active) == 0 {
@@ -1294,8 +1398,45 @@ func runListViews(apiURL string) error {
 	fmt.Printf("Capture URL: %s\n", selected.CaptureURL)
 	fmt.Printf("ID:          %s\n", selected.ID)
 	fmt.Println()
-	fmt.Printf("To stream request info, run \"rbite --tail-view %s\"\n", selected.ID)
+	fmt.Printf("To stream request info, run \"rbite --views-tail %s\"\n", selected.ID)
 	return nil
+}
+
+func runOpenView(apiURL, viewID string) error {
+	cfg, err := ensureAuthenticated(apiURL)
+	if err != nil {
+		return err
+	}
+	if cfg.AccountID == "" {
+		return errors.New("no account selected; run rbite --switch-accounts first")
+	}
+
+	hqURL := strings.TrimRight(getEnv("HQ_URL", ""), "/")
+	if hqURL == "" {
+		return errors.New("HQ_URL is not set in .env")
+	}
+	target := hqURL + "/views/" + viewID + "/capture"
+
+	if tryOpenBrowser(target) {
+		fmt.Printf("Opened %s in your browser.\n", target)
+	} else {
+		fmt.Printf("Could not open browser. Visit this URL manually:\n\n  %s\n", target)
+	}
+	return nil
+}
+
+// tryOpenBrowser attempts to open rawURL in the default browser and reports success.
+func tryOpenBrowser(rawURL string) bool {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", rawURL)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", rawURL)
+	default:
+		cmd = exec.Command("xdg-open", rawURL)
+	}
+	return cmd.Run() == nil
 }
 
 // ANSI colour constants used by the JSON pretty-printer.
