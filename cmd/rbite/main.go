@@ -4,7 +4,10 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
 	_ "embed"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -12,6 +15,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -41,18 +45,45 @@ var (
 )
 
 type Config struct {
-	ClientID string `yaml:"clientId"`
+	ClientID     string `yaml:"clientId"`
+	AccessToken  string `yaml:"accessToken,omitempty"`
+	RefreshToken string `yaml:"refreshToken,omitempty"`
+}
+
+// configPath returns the absolute path to ~/.config/rbite/config.yaml.
+func configPath() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("could not determine home directory: %w", err)
+	}
+	return filepath.Join(home, ".config", "rbite", "config.yaml"), nil
+}
+
+// saveConfig persists cfg to the config file with mode 0600.
+func saveConfig(cfg *Config) error {
+	path, err := configPath()
+	if err != nil {
+		return err
+	}
+	out, err := yaml.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("could not marshal config: %w", err)
+	}
+	if err := os.WriteFile(path, out, 0o600); err != nil {
+		return fmt.Errorf("could not write config file: %w", err)
+	}
+	// Ensure permissions are 0600 even if the file already existed with looser perms.
+	return os.Chmod(path, 0o600)
 }
 
 // loadOrCreateConfig reads ~/.config/rbite/config.yaml, creating it with a
 // fresh UUIDv4 clientId if it does not already exist.
 func loadOrCreateConfig() (*Config, error) {
-	home, err := os.UserHomeDir()
+	cfgPath, err := configPath()
 	if err != nil {
-		return nil, fmt.Errorf("could not determine home directory: %w", err)
+		return nil, err
 	}
-	cfgDir := filepath.Join(home, ".config", "rbite")
-	cfgPath := filepath.Join(cfgDir, "config.yaml")
+	cfgDir := filepath.Dir(cfgPath)
 
 	data, err := os.ReadFile(cfgPath)
 	if err != nil && !os.IsNotExist(err) {
@@ -66,12 +97,8 @@ func loadOrCreateConfig() (*Config, error) {
 			return nil, fmt.Errorf("could not create config directory: %w", mkErr)
 		}
 		cfg.ClientID = uuid.New().String()
-		out, marshalErr := yaml.Marshal(&cfg)
-		if marshalErr != nil {
-			return nil, fmt.Errorf("could not marshal config: %w", marshalErr)
-		}
-		if writeErr := os.WriteFile(cfgPath, out, 0o644); writeErr != nil {
-			return nil, fmt.Errorf("could not write config file: %w", writeErr)
+		if saveErr := saveConfig(&cfg); saveErr != nil {
+			return nil, saveErr
 		}
 		fmt.Printf("Created default configuration file in ~/.config/rbite/config.yaml\n")
 		return &cfg, nil
@@ -84,12 +111,8 @@ func loadOrCreateConfig() (*Config, error) {
 	// Populate missing clientId and persist.
 	if cfg.ClientID == "" {
 		cfg.ClientID = uuid.New().String()
-		out, marshalErr := yaml.Marshal(&cfg)
-		if marshalErr != nil {
-			return nil, fmt.Errorf("could not marshal config: %w", marshalErr)
-		}
-		if writeErr := os.WriteFile(cfgPath, out, 0o644); writeErr != nil {
-			return nil, fmt.Errorf("could not write config file: %w", writeErr)
+		if saveErr := saveConfig(&cfg); saveErr != nil {
+			return nil, saveErr
 		}
 	}
 
@@ -135,6 +158,7 @@ func printHelp() {
 	fmt.Println("Options:")
 	fmt.Printf("  -e, --ephemeral int         Port to expose via ephemeral tunnel\n")
 	fmt.Printf("  -h, --help                  Show help information\n")
+	fmt.Printf("      --login                 Log in via browser (OIDC)\n")
 	fmt.Printf("      --no-upgrade-check      Disable automatic upgrade check\n")
 	fmt.Printf("  -r, --resume                Resume the last session if it has not expired\n")
 	fmt.Printf("      --tunnel-server string  Tunnel server URL (default %q)\n", defaultServer)
@@ -148,12 +172,13 @@ func main() {
 
 	// Command line flags
 	var (
-		ephemeralPort   int
-		showVersion     bool
-		showHelp        bool
-		resume          bool
-		serverURL       string
-		noUpgradeCheck  bool
+		ephemeralPort  int
+		showVersion    bool
+		showHelp       bool
+		resume         bool
+		serverURL      string
+		noUpgradeCheck bool
+		loginMode      bool
 	)
 	defaultServer := buildDefaultServerURL()
 
@@ -167,6 +192,7 @@ func main() {
 	flag.BoolVar(&resume, "resume", false, "")
 	flag.StringVar(&serverURL, "tunnel-server", defaultServer, "")
 	flag.BoolVar(&noUpgradeCheck, "no-upgrade-check", false, "")
+	flag.BoolVar(&loginMode, "login", false, "")
 	flag.Usage = printHelp
 	flag.Parse()
 
@@ -185,6 +211,15 @@ func main() {
 	// Show help
 	if showHelp {
 		printHelp()
+		os.Exit(0)
+	}
+
+	// Login flow
+	if loginMode {
+		apiURL := getEnv("REQUESTBITE_API_URL", serverURL)
+		if err := runLogin(apiURL); err != nil {
+			log.Fatalf("Login failed: %v", err)
+		}
 		os.Exit(0)
 	}
 
@@ -641,3 +676,229 @@ func getEnv(key, fallback string) string {
 
 // Ensure wsConn satisfies io.ReadWriteCloser (required by yamux).
 var _ io.ReadWriteCloser = (*wsConn)(nil)
+
+// oidcConfig holds the subset of fields from a .well-known/openid-configuration document.
+type oidcConfig struct {
+	AuthorizationEndpoint string `json:"authorization_endpoint"`
+	TokenEndpoint         string `json:"token_endpoint"`
+}
+
+// fetchOIDCConfig retrieves the OIDC discovery document from apiURL/.well-known/openid-configuration.
+func fetchOIDCConfig(apiURL string) (*oidcConfig, error) {
+	discoveryURL := strings.TrimRight(apiURL, "/") + "/.well-known/openid-configuration"
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", discoveryURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("could not reach OIDC discovery endpoint: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("OIDC discovery returned status %d", resp.StatusCode)
+	}
+
+	var cfg oidcConfig
+	if err := json.NewDecoder(resp.Body).Decode(&cfg); err != nil {
+		return nil, fmt.Errorf("could not parse OIDC discovery document: %w", err)
+	}
+	if cfg.AuthorizationEndpoint == "" || cfg.TokenEndpoint == "" {
+		return nil, errors.New("OIDC discovery document is missing required endpoints")
+	}
+	return &cfg, nil
+}
+
+// generatePKCE returns a code_verifier and its S256 code_challenge.
+func generatePKCE() (verifier, challenge string, err error) {
+	buf := make([]byte, 32)
+	if _, err = rand.Read(buf); err != nil {
+		return "", "", fmt.Errorf("could not generate PKCE verifier: %w", err)
+	}
+	verifier = base64.RawURLEncoding.EncodeToString(buf)
+	sum := sha256.Sum256([]byte(verifier))
+	challenge = base64.RawURLEncoding.EncodeToString(sum[:])
+	return verifier, challenge, nil
+}
+
+// openBrowser attempts to open url in the system default browser.
+// Errors are ignored — the URL is always printed separately.
+func openBrowser(rawURL string) {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", rawURL)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", rawURL)
+	default:
+		cmd = exec.Command("xdg-open", rawURL)
+	}
+	_ = cmd.Start()
+}
+
+// exchangeCodeForToken exchanges an authorization code for an access token and optional refresh token.
+func exchangeCodeForToken(tokenEndpoint, code, codeVerifier, redirectURI, clientID string) (accessToken, refreshToken string, err error) {
+	params := url.Values{}
+	params.Set("grant_type", "authorization_code")
+	params.Set("code", code)
+	params.Set("redirect_uri", redirectURI)
+	params.Set("client_id", clientID)
+	params.Set("code_verifier", codeVerifier)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", tokenEndpoint, strings.NewReader(params.Encode()))
+	if err != nil {
+		return "", "", err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", "", fmt.Errorf("token request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", "", fmt.Errorf("token endpoint returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var tokenResp struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+		Error        string `json:"error"`
+		ErrorDesc    string `json:"error_description"`
+	}
+	if err := json.Unmarshal(body, &tokenResp); err != nil {
+		return "", "", fmt.Errorf("could not parse token response: %w", err)
+	}
+	if tokenResp.Error != "" {
+		return "", "", fmt.Errorf("token error %q: %s", tokenResp.Error, tokenResp.ErrorDesc)
+	}
+	if tokenResp.AccessToken == "" {
+		return "", "", errors.New("token response did not contain an access_token")
+	}
+	return tokenResp.AccessToken, tokenResp.RefreshToken, nil
+}
+
+// runLogin performs the OIDC Authorization Code + PKCE login flow.
+func runLogin(apiURL string) error {
+	clientID := getEnv("OAUTH_CLIENT_ID", "")
+	if clientID == "" {
+		return errors.New("OAUTH_CLIENT_ID is not set")
+	}
+	scopes := getEnv("OAUTH_SCOPES", "openid email profile")
+	callbackURL := getEnv("OAUTH_CALLBACK_URL", "http://localhost:7332/auth/callback")
+
+	// Parse callback URL to determine where to listen.
+	parsedCB, err := url.Parse(callbackURL)
+	if err != nil {
+		return fmt.Errorf("invalid OAUTH_CALLBACK_URL: %w", err)
+	}
+	listenAddr := parsedCB.Host
+	callbackPath := parsedCB.Path
+
+	// Discover OIDC endpoints.
+	oidc, err := fetchOIDCConfig(apiURL)
+	if err != nil {
+		return err
+	}
+
+	// Generate PKCE and state.
+	verifier, challenge, err := generatePKCE()
+	if err != nil {
+		return err
+	}
+	state := uuid.New().String()
+
+	// Build the authorization URL.
+	authParams := url.Values{}
+	authParams.Set("response_type", "code")
+	authParams.Set("client_id", clientID)
+	authParams.Set("redirect_uri", callbackURL)
+	authParams.Set("scope", scopes)
+	authParams.Set("state", state)
+	authParams.Set("code_challenge", challenge)
+	authParams.Set("code_challenge_method", "S256")
+	authURL := oidc.AuthorizationEndpoint + "?" + authParams.Encode()
+
+	// Start local callback server before opening the browser.
+	codeCh := make(chan string, 1)
+	errCh := make(chan error, 1)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc(callbackPath, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("state") != state {
+			http.Error(w, "state mismatch", http.StatusBadRequest)
+			errCh <- errors.New("state mismatch in callback")
+			return
+		}
+		code := r.URL.Query().Get("code")
+		if code == "" {
+			if e := r.URL.Query().Get("error"); e != "" {
+				desc := r.URL.Query().Get("error_description")
+				http.Error(w, "authorization denied", http.StatusBadRequest)
+				errCh <- fmt.Errorf("authorization error %q: %s", e, desc)
+				return
+			}
+			http.Error(w, "missing authorization code", http.StatusBadRequest)
+			errCh <- errors.New("callback did not contain an authorization code")
+			return
+		}
+		fmt.Fprintln(w, "Login successful. You may close this tab.")
+		codeCh <- code
+	})
+
+	srv := &http.Server{Addr: listenAddr, Handler: mux}
+	go func() {
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errCh <- fmt.Errorf("callback server error: %w", err)
+		}
+	}()
+	defer srv.Shutdown(context.Background()) //nolint:errcheck
+
+	fmt.Printf("Opening browser for login...\n\n")
+	fmt.Printf("If the browser does not open, visit this URL manually:\n\n  %s\n\n", authURL)
+	openBrowser(authURL)
+	fmt.Println("Waiting for authorization...")
+
+	// Wait up to 5 minutes for the callback.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	var code string
+	select {
+	case <-ctx.Done():
+		return errors.New("login timed out waiting for browser callback")
+	case err := <-errCh:
+		return err
+	case code = <-codeCh:
+	}
+
+	// Exchange code for token.
+	accessToken, refreshToken, err := exchangeCodeForToken(oidc.TokenEndpoint, code, verifier, callbackURL, clientID)
+	if err != nil {
+		return err
+	}
+
+	// Persist tokens in config.
+	cfg, err := loadOrCreateConfig()
+	if err != nil {
+		return err
+	}
+	cfg.AccessToken = accessToken
+	cfg.RefreshToken = refreshToken
+	if err := saveConfig(cfg); err != nil {
+		return err
+	}
+
+	fmt.Println("Login successful. Access token stored in ~/.config/rbite/config.yaml")
+	return nil
+}
