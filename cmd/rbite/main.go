@@ -1462,11 +1462,50 @@ func printRequestEvent(raw string) {
 			}
 			sort.Strings(keys)
 			for _, k := range keys {
-				v := fmt.Sprintf("%v", qsMap[k])
+				var v string
+				switch val := qsMap[k].(type) {
+				case []interface{}:
+					parts := make([]string, len(val))
+					for i, item := range val {
+						parts[i] = fmt.Sprintf("%v", item)
+					}
+					v = strings.Join(parts, ", ")
+				default:
+					v = fmt.Sprintf("%v", val)
+				}
 				fmt.Printf("%-*s  %s\n", maxLen, k, v)
 			}
 		} else {
 			fmt.Println(qs)
+		}
+		fmt.Println()
+	}
+
+	// ── Form Fields (optional) ───────────────────────────────────────────────
+	if fields, ok := evt["formFields"].(map[string]interface{}); ok && len(fields) > 0 {
+		sectionHeader("Form Fields")
+		maxLen := 0
+		keys := make([]string, 0, len(fields))
+		for k := range fields {
+			keys = append(keys, k)
+			if len(k) > maxLen {
+				maxLen = len(k)
+			}
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			var v string
+			switch val := fields[k].(type) {
+			case []interface{}:
+				parts := make([]string, len(val))
+				for i, item := range val {
+					parts[i] = fmt.Sprintf("%v", item)
+				}
+				v = strings.Join(parts, ", ")
+			default:
+				v = fmt.Sprintf("%v", val)
+			}
+			fmt.Printf("%-*s  %s\n", maxLen, k, v)
 		}
 		fmt.Println()
 	}
