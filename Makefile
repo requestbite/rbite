@@ -24,7 +24,12 @@ LDFLAGS := -s -w \
 	-X 'main.Version=$(VERSION)' \
 	-X 'main.BuildTime=$(BUILD_TIME)' \
 	-X 'main.GitCommit=$(GIT_COMMIT)' \
-	-X 'main.DefaultAPIHostname=$(API_HOSTNAME)'
+	-X 'main.DefaultAPIHostname=$(API_HOSTNAME)' \
+	-X 'main.DefaultAPIURL=$(REQUESTBITE_API_URL)' \
+	-X 'main.DefaultHQURL=$(HQ_URL)' \
+	-X 'main.DefaultOAuthClientID=$(OAUTH_CLIENT_ID)' \
+	-X 'main.DefaultOAuthScopes=$(OAUTH_SCOPES)' \
+	-X 'main.DefaultOAuthCallbackURL=$(OAUTH_CALLBACK_URL)'
 
 BUILD_FLAGS := -ldflags="$(LDFLAGS)" -trimpath
 

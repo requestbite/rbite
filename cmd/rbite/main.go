@@ -42,7 +42,12 @@ var (
 	Version             = "dev"
 	BuildTime           = "unknown"
 	GitCommit           = "unknown"
-	DefaultAPIHostname  = ""
+	DefaultAPIHostname      = ""
+	DefaultAPIURL           = ""
+	DefaultHQURL            = ""
+	DefaultOAuthClientID    = ""
+	DefaultOAuthScopes      = "openid email profile"
+	DefaultOAuthCallbackURL = "http://localhost:7332/auth/callback"
 )
 
 type Config struct {
@@ -150,6 +155,18 @@ func buildDefaultServerURL() string {
 		return "https://" + h
 	}
 	return "http://localhost:8080"
+}
+
+// resolveAPIURL returns the effective REQUESTBITE_API_URL, preferring (in order):
+// the runtime env var, the compile-time default, then the tunnel server URL fallback.
+func resolveAPIURL(serverURL string) string {
+	if v := getEnv("REQUESTBITE_API_URL", ""); v != "" {
+		return v
+	}
+	if DefaultAPIURL != "" {
+		return DefaultAPIURL
+	}
+	return serverURL
 }
 
 func printHelp() {
@@ -266,7 +283,7 @@ func main() {
 
 	// Login flow
 	if loginMode {
-		apiURL := getEnv("REQUESTBITE_API_URL", serverURL)
+		apiURL := resolveAPIURL(serverURL)
 		if err := runLogin(apiURL); err != nil {
 			log.Fatalf("Login failed: %v", err)
 		}
@@ -275,7 +292,7 @@ func main() {
 
 	// Tail view
 	if tailViewID != "" || viewTailNoID {
-		apiURL := getEnv("REQUESTBITE_API_URL", serverURL)
+		apiURL := resolveAPIURL(serverURL)
 		id := tailViewID
 		if id == "" {
 			var err error
@@ -292,7 +309,7 @@ func main() {
 
 	// Open view in browser
 	if openViewID != "" || viewOpenNoID {
-		apiURL := getEnv("REQUESTBITE_API_URL", serverURL)
+		apiURL := resolveAPIURL(serverURL)
 		id := openViewID
 		if id == "" {
 			var err error
@@ -309,7 +326,7 @@ func main() {
 
 	// Add view
 	if addViewName != "" || viewAddNoName {
-		apiURL := getEnv("REQUESTBITE_API_URL", serverURL)
+		apiURL := resolveAPIURL(serverURL)
 		name := addViewName // may be empty — runAddView handles that
 		if err := runAddView(apiURL, name); err != nil {
 			log.Fatalf("Add view failed: %v", err)
@@ -319,7 +336,7 @@ func main() {
 
 	// List views
 	if listViews {
-		apiURL := getEnv("REQUESTBITE_API_URL", serverURL)
+		apiURL := resolveAPIURL(serverURL)
 		if err := runListViews(apiURL); err != nil {
 			log.Fatalf("List views failed: %v", err)
 		}
@@ -328,7 +345,7 @@ func main() {
 
 	// Switch accounts
 	if switchAccounts {
-		apiURL := getEnv("REQUESTBITE_API_URL", serverURL)
+		apiURL := resolveAPIURL(serverURL)
 		if err := runSwitchAccounts(apiURL); err != nil {
 			log.Fatalf("Switch accounts failed: %v", err)
 		}
@@ -902,12 +919,12 @@ func exchangeCodeForToken(tokenEndpoint, code, codeVerifier, redirectURI, client
 
 // runLogin performs the OIDC Authorization Code + PKCE login flow.
 func runLogin(apiURL string) error {
-	clientID := getEnv("OAUTH_CLIENT_ID", "")
+	clientID := getEnv("OAUTH_CLIENT_ID", DefaultOAuthClientID)
 	if clientID == "" {
 		return errors.New("OAUTH_CLIENT_ID is not set")
 	}
-	scopes := getEnv("OAUTH_SCOPES", "openid email profile")
-	callbackURL := getEnv("OAUTH_CALLBACK_URL", "http://localhost:7332/auth/callback")
+	scopes := getEnv("OAUTH_SCOPES", DefaultOAuthScopes)
+	callbackURL := getEnv("OAUTH_CALLBACK_URL", DefaultOAuthCallbackURL)
 
 	// Parse callback URL to determine where to listen.
 	parsedCB, err := url.Parse(callbackURL)
@@ -1170,7 +1187,7 @@ func ensureAuthenticated(apiURL string) (*Config, error) {
 
 	// Have a refresh token but no access token — refresh silently.
 	if cfg.AccessToken == "" && cfg.RefreshToken != "" {
-		clientID := getEnv("OAUTH_CLIENT_ID", "")
+		clientID := getEnv("OAUTH_CLIENT_ID", DefaultOAuthClientID)
 		newAccess, newRefresh, err := refreshAccessToken(apiURL, cfg.RefreshToken, clientID)
 		if err != nil {
 			return nil, fmt.Errorf("could not refresh credentials: %w", err)
@@ -1209,7 +1226,7 @@ func authedGet(apiURL, path, accessToken string, cfg *Config) (*http.Response, e
 
 	if resp.StatusCode == http.StatusUnauthorized && cfg.RefreshToken != "" {
 		resp.Body.Close()
-		clientID := getEnv("OAUTH_CLIENT_ID", "")
+		clientID := getEnv("OAUTH_CLIENT_ID", DefaultOAuthClientID)
 		newAccess, newRefresh, refreshErr := refreshAccessToken(apiURL, cfg.RefreshToken, clientID)
 		if refreshErr != nil {
 			return nil, fmt.Errorf("session expired and token refresh failed: %w", refreshErr)
@@ -1249,7 +1266,7 @@ func authedPost(apiURL, path, accessToken string, body []byte, cfg *Config) (*ht
 
 	if resp.StatusCode == http.StatusUnauthorized && cfg.RefreshToken != "" {
 		resp.Body.Close()
-		clientID := getEnv("OAUTH_CLIENT_ID", "")
+		clientID := getEnv("OAUTH_CLIENT_ID", DefaultOAuthClientID)
 		newAccess, newRefresh, refreshErr := refreshAccessToken(apiURL, cfg.RefreshToken, clientID)
 		if refreshErr != nil {
 			return nil, fmt.Errorf("session expired and token refresh failed: %w", refreshErr)
@@ -1454,7 +1471,7 @@ func runListViews(apiURL string) error {
 
 	selected := active[choice-1]
 	fmt.Println()
-	hqURL := strings.TrimRight(getEnv("HQ_URL", ""), "/")
+	hqURL := strings.TrimRight(getEnv("HQ_URL", DefaultHQURL), "/")
 	fmt.Printf("Name:        %s\n", selected.Name)
 	fmt.Printf("Capture URL: %s\n", selected.CaptureURL)
 	fmt.Printf("Browser URL: %s\n", hqURL+"/views/"+selected.ID+"/capture")
@@ -1519,7 +1536,7 @@ func runOpenView(apiURL, viewID string) error {
 		return errors.New("no account selected; run rbite --switch-accounts first")
 	}
 
-	hqURL := strings.TrimRight(getEnv("HQ_URL", ""), "/")
+	hqURL := strings.TrimRight(getEnv("HQ_URL", DefaultHQURL), "/")
 	if hqURL == "" {
 		return errors.New("HQ_URL is not set in .env")
 	}
@@ -1852,7 +1869,7 @@ func streamSSE(ctx context.Context, apiURL, path string, cfg *Config) error {
 	// Transparent token refresh on 401.
 	if resp.StatusCode == http.StatusUnauthorized && cfg.RefreshToken != "" {
 		resp.Body.Close()
-		clientID := getEnv("OAUTH_CLIENT_ID", "")
+		clientID := getEnv("OAUTH_CLIENT_ID", DefaultOAuthClientID)
 		newAccess, newRefresh, refreshErr := refreshAccessToken(apiURL, cfg.RefreshToken, clientID)
 		if refreshErr != nil {
 			return fmt.Errorf("session expired and token refresh failed: %w", refreshErr)
