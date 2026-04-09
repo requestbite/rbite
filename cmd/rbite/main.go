@@ -1454,11 +1454,13 @@ func runListViews(apiURL string) error {
 
 	selected := active[choice-1]
 	fmt.Println()
+	hqURL := strings.TrimRight(getEnv("HQ_URL", ""), "/")
 	fmt.Printf("Name:        %s\n", selected.Name)
 	fmt.Printf("Capture URL: %s\n", selected.CaptureURL)
+	fmt.Printf("Browser URL: %s\n", hqURL+"/views/"+selected.ID+"/capture")
 	fmt.Printf("ID:          %s\n", selected.ID)
 	fmt.Println()
-	fmt.Printf("To stream request info, run \"rbite --views-tail %s\"\n", selected.ID)
+	fmt.Printf("To tail request info, run \"rbite --views-tail %s\"\n", selected.ID)
 	return nil
 }
 
