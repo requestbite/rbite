@@ -184,7 +184,7 @@ get_latest_version() {
   info "Fetching latest version from GitHub..." >&2
 
   local version
-  version=$(curl -fsSL "https://api.github.com/repos/$GITHUB_REPO/releases/latest" |
+  version=$(curl -fsSL -H "User-Agent: rbite-installer" "https://api.github.com/repos/$GITHUB_REPO/releases/latest" |
     grep '"tag_name"' |
     sed -E 's/.*"tag_name": *"v?([^"]+)".*/\1/' || echo "")
 
