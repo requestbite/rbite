@@ -191,8 +191,12 @@ func printHelp() {
 }
 
 func main() {
-	// Load .env file
-	_ = godotenv.Load()
+	// Load .env file for local development only.
+	// In production builds the compile-time defaults are baked in via ldflags,
+	// so we skip .env loading to prevent local files from overriding them.
+	if DefaultAPIHostname == "" && DefaultAPIURL == "" {
+		_ = godotenv.Load()
+	}
 
 	// Command line flags
 	var (
