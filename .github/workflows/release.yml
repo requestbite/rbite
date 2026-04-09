@@ -34,6 +34,11 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.VERSION }}
           API_HOSTNAME: ${{ vars.API_HOSTNAME }}
+          REQUESTBITE_API_URL: ${{ vars.REQUESTBITE_API_URL }}
+          HQ_URL: ${{ vars.HQ_URL }}
+          OAUTH_CLIENT_ID: ${{ vars.OAUTH_CLIENT_ID }}
+          OAUTH_SCOPES: ${{ vars.OAUTH_SCOPES }}
+          OAUTH_CALLBACK_URL: ${{ vars.OAUTH_CALLBACK_URL }}
           DEBUG: ${{ vars.DEBUG }}
 
       - name: Create GitHub Release
