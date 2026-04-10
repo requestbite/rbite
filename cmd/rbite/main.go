@@ -37,6 +37,9 @@ import (
 //go:embed tunnel-art.txt
 var tunnelArt string
 
+// errSessionExpired is returned when the refresh token is also invalid, requiring re-login.
+var errSessionExpired = errors.New("session expired")
+
 // Version information — set via ldflags at build time.
 var (
 	Version             = "dev"
@@ -297,15 +300,19 @@ func main() {
 	// Tail view
 	if tailViewID != "" || viewTailNoID {
 		apiURL := resolveAPIURL(serverURL)
-		id := tailViewID
-		if id == "" {
-			var err error
-			id, err = selectView(apiURL, "tail")
-			if err != nil {
-				log.Fatalf("View selection failed: %v", err)
+		var id string
+		if err := runWithAutoRelogin(apiURL, func() error {
+			if tailViewID != "" {
+				id = tailViewID
+				return nil
 			}
+			var e error
+			id, e = selectView(apiURL, "tail")
+			return e
+		}); err != nil {
+			log.Fatalf("View selection failed: %v", err)
 		}
-		if err := runTailView(apiURL, id); err != nil {
+		if err := runWithAutoRelogin(apiURL, func() error { return runTailView(apiURL, id) }); err != nil {
 			log.Fatalf("Tail view failed: %v", err)
 		}
 		os.Exit(0)
@@ -314,15 +321,19 @@ func main() {
 	// Open view in browser
 	if openViewID != "" || viewOpenNoID {
 		apiURL := resolveAPIURL(serverURL)
-		id := openViewID
-		if id == "" {
-			var err error
-			id, err = selectView(apiURL, "open")
-			if err != nil {
-				log.Fatalf("View selection failed: %v", err)
+		var id string
+		if err := runWithAutoRelogin(apiURL, func() error {
+			if openViewID != "" {
+				id = openViewID
+				return nil
 			}
+			var e error
+			id, e = selectView(apiURL, "open")
+			return e
+		}); err != nil {
+			log.Fatalf("View selection failed: %v", err)
 		}
-		if err := runOpenView(apiURL, id); err != nil {
+		if err := runWithAutoRelogin(apiURL, func() error { return runOpenView(apiURL, id) }); err != nil {
 			log.Fatalf("Open view failed: %v", err)
 		}
 		os.Exit(0)
@@ -332,7 +343,7 @@ func main() {
 	if addViewName != "" || viewAddNoName {
 		apiURL := resolveAPIURL(serverURL)
 		name := addViewName // may be empty — runAddView handles that
-		if err := runAddView(apiURL, name); err != nil {
+		if err := runWithAutoRelogin(apiURL, func() error { return runAddView(apiURL, name) }); err != nil {
 			log.Fatalf("Add view failed: %v", err)
 		}
 		os.Exit(0)
@@ -341,7 +352,7 @@ func main() {
 	// List views
 	if listViews {
 		apiURL := resolveAPIURL(serverURL)
-		if err := runListViews(apiURL); err != nil {
+		if err := runWithAutoRelogin(apiURL, func() error { return runListViews(apiURL) }); err != nil {
 			log.Fatalf("List views failed: %v", err)
 		}
 		os.Exit(0)
@@ -350,7 +361,7 @@ func main() {
 	// Switch accounts
 	if switchAccounts {
 		apiURL := resolveAPIURL(serverURL)
-		if err := runSwitchAccounts(apiURL); err != nil {
+		if err := runWithAutoRelogin(apiURL, func() error { return runSwitchAccounts(apiURL) }); err != nil {
 			log.Fatalf("Switch accounts failed: %v", err)
 		}
 		os.Exit(0)
@@ -921,6 +932,25 @@ func exchangeCodeForToken(tokenEndpoint, code, codeVerifier, redirectURI, client
 	return tokenResp.AccessToken, tokenResp.RefreshToken, nil
 }
 
+// runWithAutoRelogin runs fn. If it returns an errSessionExpired error, it
+// prompts the user to log in again and retries fn once after a successful login.
+func runWithAutoRelogin(apiURL string, fn func() error) error {
+	err := fn()
+	if err == nil || !errors.Is(err, errSessionExpired) {
+		return err
+	}
+	fmt.Print("\nYou've been logged out and need to login again, continue? (Y/n): ")
+	reader := bufio.NewReader(os.Stdin)
+	response, readErr := reader.ReadString('\n')
+	if readErr != nil || strings.EqualFold(strings.TrimSpace(response), "n") {
+		return errors.New("login cancelled")
+	}
+	if loginErr := runLogin(apiURL); loginErr != nil {
+		return fmt.Errorf("login failed: %w", loginErr)
+	}
+	return fn()
+}
+
 // runLogin performs the OIDC Authorization Code + PKCE login flow.
 func runLogin(apiURL string) error {
 	clientID := getEnv("OAUTH_CLIENT_ID", DefaultOAuthClientID)
@@ -1233,7 +1263,7 @@ func authedGet(apiURL, path, accessToken string, cfg *Config) (*http.Response, e
 		clientID := getEnv("OAUTH_CLIENT_ID", DefaultOAuthClientID)
 		newAccess, newRefresh, refreshErr := refreshAccessToken(apiURL, cfg.RefreshToken, clientID)
 		if refreshErr != nil {
-			return nil, fmt.Errorf("session expired and token refresh failed: %w", refreshErr)
+			return nil, fmt.Errorf("%w; token refresh failed: %v", errSessionExpired, refreshErr)
 		}
 		cfg.AccessToken = newAccess
 		if newRefresh != "" {
@@ -1273,7 +1303,7 @@ func authedPost(apiURL, path, accessToken string, body []byte, cfg *Config) (*ht
 		clientID := getEnv("OAUTH_CLIENT_ID", DefaultOAuthClientID)
 		newAccess, newRefresh, refreshErr := refreshAccessToken(apiURL, cfg.RefreshToken, clientID)
 		if refreshErr != nil {
-			return nil, fmt.Errorf("session expired and token refresh failed: %w", refreshErr)
+			return nil, fmt.Errorf("%w; token refresh failed: %v", errSessionExpired, refreshErr)
 		}
 		cfg.AccessToken = newAccess
 		if newRefresh != "" {
@@ -1876,7 +1906,7 @@ func streamSSE(ctx context.Context, apiURL, path string, cfg *Config) error {
 		clientID := getEnv("OAUTH_CLIENT_ID", DefaultOAuthClientID)
 		newAccess, newRefresh, refreshErr := refreshAccessToken(apiURL, cfg.RefreshToken, clientID)
 		if refreshErr != nil {
-			return fmt.Errorf("session expired and token refresh failed: %w", refreshErr)
+			return fmt.Errorf("%w; token refresh failed: %v", errSessionExpired, refreshErr)
 		}
 		cfg.AccessToken = newAccess
 		if newRefresh != "" {
