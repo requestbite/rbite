@@ -1,0 +1,168 @@
+.TH RBITE 1 "" "rbite" "User Commands"
+.SH NAME
+rbite \- expose local ports via ephemeral tunnels and inspect HTTP requests
+.SH SYNOPSIS
+.B rbite
+[\fIOPTIONS\fR]
+.SH DESCRIPTION
+.B rbite
+is the command-line client for RequestBite, a tunnelling and HTTP inspection
+service.
+It can create a short-lived public URL that forwards traffic to a port on your
+local machine (an \fIephemeral tunnel\fR), resume a tunnel session that is still
+active, and manage \fIinspector views\fR \(em persistent capture endpoints whose
+incoming requests you can stream and inspect in real time.
+.PP
+On first run
+.B rbite
+creates a configuration file at
+.I ~/.config/rbite/config.yaml
+containing a unique client identifier.
+Authentication tokens are stored in the same file after a successful login.
+.SH OPTIONS
+.SS Account management
+.TP
+.B \-\-login
+Open the default web browser and start an OIDC login flow.
+On completion the access and refresh tokens are saved to the configuration file.
+Run this command before using any feature that requires an authenticated account.
+.TP
+.B \-\-switch\-accounts
+Interactively select which account to make active when more than one account
+has been authenticated.
+The selected account ID is persisted to the configuration file.
+.SS Request views
+.TP
+.B \-\-views\-list
+Print all inspector views associated with the current account.
+Each view has a unique ID, a name, and a capture URL to which HTTP requests can
+be sent.
+.TP
+\fB\-\-views\-add\fR [\fIname\fR]
+Create a new inspector view.
+If \fIname\fR is not provided on the command line,
+.B rbite
+prompts for one interactively.
+.TP
+\fB\-\-views\-tail\fR [\fIview-id\fR]
+Stream incoming HTTP requests for the given view in real time.
+If \fIview-id\fR is omitted,
+.B rbite
+shows an interactive list of available views and prompts for a selection.
+Press
+.B Ctrl\-C
+to stop streaming.
+.TP
+\fB\-\-views\-open\fR [\fIview-id\fR]
+Open the capture URL of the specified view in the default web browser.
+If \fIview-id\fR is omitted,
+.B rbite
+prompts for a selection from the available views.
+.SS Tunnel management
+.TP
+\fB\-e\fR \fIport\fR, \fB\-\-ephemeral\fR \fIport\fR
+Create an ephemeral tunnel exposing the local TCP port \fIport\fR to the public
+internet.
+.B rbite
+prints the assigned public URL and keeps the tunnel open until it is interrupted
+with
+.BR Ctrl\-C .
+The tunnel session expires automatically after a server-defined interval.
+.TP
+.BR \-r ", " \-\-resume
+Resume the most recent tunnel session for this client if it has not yet expired.
+.B rbite
+retrieves the existing public URL from the server and reopens the tunnel
+connection without allocating a new address.
+Mutually exclusive with
+.BR \-\-ephemeral .
+.TP
+\fB\-\-tunnel\-server\fR \fIurl\fR
+Override the tunnel server base URL.
+Defaults to
+.I https://api.t.rbite.dev
+(or the value baked in at build time).
+Useful for self-hosted deployments or local development.
+.SS Other
+.TP
+.B \-\-no\-upgrade\-check
+Suppress the automatic check for a newer version of
+.B rbite
+that normally runs at startup.
+.TP
+.BR \-h ", " \-\-help
+Print a short usage summary and exit.
+.TP
+.BR \-v ", " \-\-version
+Print the version number, build timestamp, and git commit hash, then exit.
+.SH EXAMPLES
+.TP
+Expose the local server on port 3000:
+.EX
+rbite \-e 3000
+.EE
+.TP
+Resume the last active tunnel session:
+.EX
+rbite \-\-resume
+.EE
+.TP
+Log in to a RequestBite account:
+.EX
+rbite \-\-login
+.EE
+.TP
+List all inspector views for the current account:
+.EX
+rbite \-\-views\-list
+.EE
+.TP
+Create a new inspector view named \fImyapi\fR:
+.EX
+rbite \-\-views\-add myapi
+.EE
+.TP
+Stream live requests for a view (select interactively):
+.EX
+rbite \-\-views\-tail
+.EE
+.TP
+Stream live requests for a specific view ID:
+.EX
+rbite \-\-views\-tail abc123
+.EE
+.TP
+Use a custom tunnel server:
+.EX
+rbite \-e 8080 \-\-tunnel\-server https://tunnel.example.com
+.EE
+.SH FILES
+.TP
+.I ~/.config/rbite/config.yaml
+Per-user configuration file.
+Created automatically on first run.
+Contains the client identifier and, after login, OAuth tokens.
+Stored with mode
+.B 0600
+to protect the tokens.
+Do not share this file.
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+An error occurred (invalid flags, network failure, authentication error, etc.).
+.SH ENVIRONMENT
+.TP
+.B REQUESTBITE_API_URL
+Overrides the API base URL at runtime.
+Takes precedence over both the
+.B \-\-tunnel\-server
+flag default and the value compiled in at build time.
+.SH BUGS
+Please report bugs and feature requests at:
+.br
+.I https://github.com/requestbite/rbite/issues
+.SH AUTHORS
+The RequestBite team.

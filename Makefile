@@ -109,6 +109,8 @@ release: build-all
 				cp "$$binary" "$$temp_dir/$(BINARY_NAME)"; \
 				cp ../LICENSE "$$temp_dir/" 2>/dev/null || true; \
 				cp ../README.md "$$temp_dir/" 2>/dev/null || true; \
+				cp -r ../completions "$$temp_dir/" 2>/dev/null || true; \
+				cp -r ../man "$$temp_dir/" 2>/dev/null || true; \
 				tar -czf "../$(DIST_DIR)/$$archive" "$$temp_dir"; \
 				rm -rf "$$temp_dir"; \
 			fi; \

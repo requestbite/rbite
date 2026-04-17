@@ -270,11 +270,11 @@ Actual:   $actual_checksum"
   success "Checksum verified"
 }
 
-# Extract binary from archive
+# Extract archive contents
 extract_binary() {
   local archive_name="$1"
 
-  info "Extracting binary..."
+  info "Extracting archive..."
 
   if [[ "$archive_name" == *.tar.gz ]]; then
     tar -xzf "$archive_name"
@@ -282,13 +282,20 @@ extract_binary() {
       die "Binary not found in archive"
     fi
     mv "$BINARY_NAME/$BINARY_NAME" "${BINARY_NAME}.tmp"
+    # Keep completions/ and man/ directories in place for later installation
+    if [ -d "$BINARY_NAME/completions" ]; then
+      mv "$BINARY_NAME/completions" completions
+    fi
+    if [ -d "$BINARY_NAME/man" ]; then
+      mv "$BINARY_NAME/man" man
+    fi
     rm -rf "$BINARY_NAME"
     mv "${BINARY_NAME}.tmp" "$BINARY_NAME"
   else
     die "Unsupported archive format: $archive_name"
   fi
 
-  success "Extracted binary"
+  success "Extracted archive"
 }
 
 # Install binary
@@ -328,6 +335,57 @@ install_binary() {
   fi
 
   success "Installed $BINARY_NAME to $install_dir"
+}
+
+# Install shell completions
+install_completions() {
+  local os="$1"
+
+  # Fish completion — user-level, works on both Linux and macOS
+  local fish_completion_dir="$HOME/.config/fish/completions"
+  if command_exists fish; then
+    mkdir -p "$fish_completion_dir"
+    if [ -f "completions/rbite.fish" ]; then
+      cp "completions/rbite.fish" "$fish_completion_dir/rbite.fish"
+      success "Installed Fish completion to $fish_completion_dir/rbite.fish"
+    fi
+  fi
+
+  # Bash completion
+  local bash_completion_dir=""
+  if [ "$os" = "darwin" ]; then
+    # Prefer Homebrew location; fall back to user-level XDG path
+    if command_exists brew; then
+      bash_completion_dir="$(brew --prefix 2>/dev/null)/etc/bash_completion.d"
+    fi
+  fi
+  if [ -z "$bash_completion_dir" ]; then
+    bash_completion_dir="$HOME/.local/share/bash-completion/completions"
+  fi
+
+  if [ -f "completions/rbite.bash" ]; then
+    mkdir -p "$bash_completion_dir"
+    cp "completions/rbite.bash" "$bash_completion_dir/rbite"
+    success "Installed Bash completion to $bash_completion_dir/rbite"
+  fi
+}
+
+# Install man page
+install_man_page() {
+  local man_dir="$HOME/.local/share/man/man1"
+
+  if [ -f "man/rbite.1" ]; then
+    mkdir -p "$man_dir"
+    cp "man/rbite.1" "$man_dir/rbite.1"
+    success "Installed man page to $man_dir/rbite.1"
+
+    # Rebuild the manual page index when tools are available
+    if command_exists mandb; then
+      mandb -q "$HOME/.local/share/man" 2>/dev/null || true
+    elif command_exists makewhatis; then
+      makewhatis "$HOME/.local/share/man" 2>/dev/null || true
+    fi
+  fi
 }
 
 # Verify installation
@@ -426,6 +484,12 @@ main() {
 
   # Install
   install_binary "$install_dir"
+
+  # Install shell completions
+  install_completions "$os"
+
+  # Install man page
+  install_man_page
 
   # Verify
   verify_installation "$install_dir"

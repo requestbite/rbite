@@ -192,6 +192,7 @@ func printHelp() {
   fmt.Printf("      --tunnel-server string  Tunnel server URL (default %q)\n", defaultServer)
 	fmt.Println("\nOther\n=====")
   fmt.Printf("      --no-upgrade-check      Disable automatic upgrade check\n")
+  fmt.Printf("      --uninstall             Uninstall rbite\n")
 	fmt.Printf("  -h, --help                  Show help information\n")
 	fmt.Printf("  -v, --version               Show version information\n")
 }
@@ -212,6 +213,7 @@ func main() {
 		resume         bool
 		serverURL      string
 		noUpgradeCheck bool
+		uninstall      bool
 		loginMode      bool
 		switchAccounts bool
 		listViews      bool
@@ -231,6 +233,7 @@ func main() {
 	flag.BoolVar(&resume, "resume", false, "")
 	flag.StringVar(&serverURL, "tunnel-server", defaultServer, "")
 	flag.BoolVar(&noUpgradeCheck, "no-upgrade-check", false, "")
+	flag.BoolVar(&uninstall, "uninstall", false, "")
 	flag.BoolVar(&loginMode, "login", false, "")
 	flag.BoolVar(&switchAccounts, "switch-accounts", false, "")
 	flag.BoolVar(&listViews, "views-list", false, "")
@@ -288,6 +291,12 @@ func main() {
 	// Show help
 	if showHelp {
 		printHelp()
+		os.Exit(0)
+	}
+
+	// Uninstall flow
+	if uninstall {
+		runUninstall()
 		os.Exit(0)
 	}
 
@@ -556,6 +565,123 @@ func installUpdate() error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+// runUninstall removes the rbite binary and optionally the config directory,
+// shell completions, and man page.
+func runUninstall() {
+	reader := bufio.NewReader(os.Stdin)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Printf("\033[31mCould not determine home directory: %v\033[0m\n", err)
+		os.Exit(1)
+	}
+
+	// --- Binary ---
+	execPath, err := os.Executable()
+	if err != nil {
+		fmt.Printf("\033[31mCould not determine binary path: %v\033[0m\n", err)
+		os.Exit(1)
+	}
+	execPath, err = filepath.EvalSymlinks(execPath)
+	if err != nil {
+		fmt.Printf("\033[31mCould not resolve binary path: %v\033[0m\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Binary to remove: %s\n", execPath)
+	fmt.Print("Remove binary? (Y/n): ")
+	resp, _ := reader.ReadString('\n')
+	resp = strings.TrimSpace(strings.ToLower(resp))
+	if resp == "" || resp == "y" || resp == "yes" {
+		if err := os.Remove(execPath); err != nil {
+			fmt.Printf("\033[31mFailed to remove binary: %v\033[0m\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("\033[32mBinary removed.\033[0m")
+	} else {
+		fmt.Println("Skipped binary removal.")
+	}
+
+	// --- Config directory ---
+	cfgPath, err := configPath()
+	if err != nil {
+		fmt.Printf("\033[31mCould not determine config path: %v\033[0m\n", err)
+		os.Exit(1)
+	}
+	cfgDir := filepath.Dir(cfgPath)
+	fmt.Printf("\nConfig directory: %s\n", cfgDir)
+	fmt.Print("Remove config directory and config file? (y/N): ")
+	resp, _ = reader.ReadString('\n')
+	resp = strings.TrimSpace(strings.ToLower(resp))
+	if resp == "y" || resp == "yes" {
+		if err := os.RemoveAll(cfgDir); err != nil {
+			fmt.Printf("\033[31mFailed to remove config directory: %v\033[0m\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("\033[32mConfig directory removed.\033[0m")
+	} else {
+		fmt.Println("Skipped config directory removal.")
+	}
+
+	// --- Shell completions ---
+	completionFiles := []string{
+		filepath.Join(home, ".config", "fish", "completions", "rbite.fish"),
+		filepath.Join(home, ".local", "share", "bash-completion", "completions", "rbite"),
+	}
+	// On macOS, also check the Homebrew bash-completion directory.
+	if runtime.GOOS == "darwin" {
+		if out, err := exec.Command("brew", "--prefix").Output(); err == nil {
+			brewPrefix := strings.TrimSpace(string(out))
+			completionFiles = append(completionFiles, filepath.Join(brewPrefix, "etc", "bash_completion.d", "rbite"))
+		}
+	}
+	var foundCompletions []string
+	for _, f := range completionFiles {
+		if _, err := os.Stat(f); err == nil {
+			foundCompletions = append(foundCompletions, f)
+		}
+	}
+	if len(foundCompletions) > 0 {
+		fmt.Println("\nShell completion files found:")
+		for _, f := range foundCompletions {
+			fmt.Printf("  %s\n", f)
+		}
+		fmt.Print("Remove shell completion files? (y/N): ")
+		resp, _ = reader.ReadString('\n')
+		resp = strings.TrimSpace(strings.ToLower(resp))
+		if resp == "y" || resp == "yes" {
+			for _, f := range foundCompletions {
+				if err := os.Remove(f); err != nil {
+					fmt.Printf("\033[31mFailed to remove %s: %v\033[0m\n", f, err)
+				} else {
+					fmt.Printf("\033[32mRemoved %s\033[0m\n", f)
+				}
+			}
+		} else {
+			fmt.Println("Skipped shell completion removal.")
+		}
+	}
+
+	// --- Man page ---
+	manPage := filepath.Join(home, ".local", "share", "man", "man1", "rbite.1")
+	if _, err := os.Stat(manPage); err == nil {
+		fmt.Printf("\nMan page: %s\n", manPage)
+		fmt.Print("Remove man page? (y/N): ")
+		resp, _ = reader.ReadString('\n')
+		resp = strings.TrimSpace(strings.ToLower(resp))
+		if resp == "y" || resp == "yes" {
+			if err := os.Remove(manPage); err != nil {
+				fmt.Printf("\033[31mFailed to remove man page: %v\033[0m\n", err)
+			} else {
+				fmt.Println("\033[32mMan page removed.\033[0m")
+			}
+		} else {
+			fmt.Println("Skipped man page removal.")
+		}
+	}
+
+	fmt.Println("\nUninstall complete.")
 }
 
 func createEphemeralTunnel(serverURL string, port int, clientID string) (*CreateEphemeralResponse, error) {
