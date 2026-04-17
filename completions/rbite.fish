@@ -32,6 +32,9 @@ complete -c rbite -s e -l ephemeral -r \
 complete -c rbite -s r -l resume \
     -d 'Resume the last tunnel session if not expired'
 
+complete -c rbite -l show-qr \
+    -d 'Print a QR code of the tunnel URL (use with -e or -r)'
+
 complete -c rbite -l tunnel-server -r \
     -d 'Tunnel server URL (default: https://api.t.rbite.dev)'
 

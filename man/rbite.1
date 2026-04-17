@@ -1,17 +1,17 @@
 .TH RBITE 1 "" "rbite" "User Commands"
 .SH NAME
-rbite \- expose local ports via ephemeral tunnels and inspect HTTP requests
+rbite \- CLI client for RequestBite
 .SH SYNOPSIS
 .B rbite
 [\fIOPTIONS\fR]
 .SH DESCRIPTION
 .B rbite
-is the command-line client for RequestBite, a tunnelling and HTTP inspection
-service.
-It can create a short-lived public URL that forwards traffic to a port on your
-local machine (an \fIephemeral tunnel\fR), resume a tunnel session that is still
-active, and manage \fIinspector views\fR \(em persistent capture endpoints whose
-incoming requests you can stream and inspect in real time.
+is the command-line client for RequestBite, a service with tools that helps
+you build and use HTTP-based APIs. Currently the rbite command can create
+short-lived public URL that forwards traffic to a port on your local machine (an
+\fIephemeral tunnel\fR), resume a tunnel session that is still active, and
+manage \fIinspector views\fR \(em persistent capture endpoints whose incoming
+webhook / HTTP requests you can stream and inspect in real time.
 .PP
 On first run
 .B rbite
@@ -23,8 +23,8 @@ Authentication tokens are stored in the same file after a successful login.
 .SS Account management
 .TP
 .B \-\-login
-Open the default web browser and start an OIDC login flow.
-On completion the access and refresh tokens are saved to the configuration file.
+Open the default web browser and start login flow.
+On completion the received credentials are saved to the configuration file.
 Run this command before using any feature that requires an authenticated account.
 .TP
 .B \-\-switch\-accounts
@@ -67,7 +67,7 @@ internet.
 prints the assigned public URL and keeps the tunnel open until it is interrupted
 with
 .BR Ctrl\-C .
-The tunnel session expires automatically after a server-defined interval.
+The tunnel session expires automatically fixed interval.
 .TP
 .BR \-r ", " \-\-resume
 Resume the most recent tunnel session for this client if it has not yet expired.
@@ -76,6 +76,15 @@ retrieves the existing public URL from the server and reopens the tunnel
 connection without allocating a new address.
 Mutually exclusive with
 .BR \-\-ephemeral .
+.TP
+.B \-\-show\-qr
+Print a QR code of the public tunnel URL to the terminal after the tunnel is
+established.
+Intended for use with
+.B \-\-ephemeral
+or
+.BR \-\-resume .
+Scan the code with a phone camera to open the tunnel URL directly on the device.
 .TP
 \fB\-\-tunnel\-server\fR \fIurl\fR
 Override the tunnel server base URL.
@@ -141,7 +150,7 @@ rbite \-e 8080 \-\-tunnel\-server https://tunnel.example.com
 .I ~/.config/rbite/config.yaml
 Per-user configuration file.
 Created automatically on first run.
-Contains the client identifier and, after login, OAuth tokens.
+Contains the client identifier and, after login, OAuth credentials.
 Stored with mode
 .B 0600
 to protect the tokens.
@@ -153,16 +162,9 @@ Success.
 .TP
 .B 1
 An error occurred (invalid flags, network failure, authentication error, etc.).
-.SH ENVIRONMENT
-.TP
-.B REQUESTBITE_API_URL
-Overrides the API base URL at runtime.
-Takes precedence over both the
-.B \-\-tunnel\-server
-flag default and the value compiled in at build time.
 .SH BUGS
 Please report bugs and feature requests at:
 .br
 .I https://github.com/requestbite/rbite/issues
 .SH AUTHORS
-The RequestBite team.
+The RequestBite team (https://requestbite.com)

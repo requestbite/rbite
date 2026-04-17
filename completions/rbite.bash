@@ -16,6 +16,7 @@ _rbite() {
         --views-open
         -e --ephemeral
         -r --resume
+        --show-qr
         --tunnel-server
         --no-upgrade-check
         -h --help

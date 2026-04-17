@@ -31,6 +31,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/hashicorp/yamux"
 	"github.com/joho/godotenv"
+	qrterminal "github.com/mdp/qrterminal/v3"
 	"gopkg.in/yaml.v3"
 )
 
@@ -189,6 +190,7 @@ func printHelp() {
 	fmt.Println("\nTunnel Mgmt\n===========")
 	fmt.Printf("  -e, --ephemeral int         Port to expose via ephemeral tunnel\n")
   fmt.Printf("  -r, --resume                Resume the last tunnel session if not expired\n")
+  fmt.Printf("      --show-qr               Print a QR code of the tunnel URL (use with -e or -r)\n")
   fmt.Printf("      --tunnel-server string  Tunnel server URL (default %q)\n", defaultServer)
 	fmt.Println("\nOther\n=====")
   fmt.Printf("      --no-upgrade-check      Disable automatic upgrade check\n")
@@ -220,6 +222,7 @@ func main() {
 		tailViewID     string
 		openViewID     string
 		addViewName    string
+		showQR         bool
 	)
 	defaultServer := buildDefaultServerURL()
 
@@ -234,6 +237,7 @@ func main() {
 	flag.StringVar(&serverURL, "tunnel-server", defaultServer, "")
 	flag.BoolVar(&noUpgradeCheck, "no-upgrade-check", false, "")
 	flag.BoolVar(&uninstall, "uninstall", false, "")
+	flag.BoolVar(&showQR, "show-qr", false, "")
 	flag.BoolVar(&loginMode, "login", false, "")
 	flag.BoolVar(&switchAccounts, "switch-accounts", false, "")
 	flag.BoolVar(&listViews, "views-list", false, "")
@@ -424,6 +428,12 @@ func main() {
 		fmt.Printf("> Internet endpoint: https://%s\n", tunnelURL)
 		fmt.Printf("> Local service: http://localhost:%d\n", ephemeralPort)
 		fmt.Printf("Press Ctrl+C to stop\n\n")
+		if showQR {
+			printQR("https://" + tunnelURL)
+		} else {
+			fmt.Printf("Want a QR code to easily open the tunnel endpoint on your phone?\n")
+			fmt.Printf(" - Hit Ctrl+C and paste \"rbite --resume --show-qr\" in your terminal.\n\n")
+		}
 	} else {
 		ephemeralResp, err := createEphemeralTunnel(serverURL, ephemeralPort, clientID)
 		if err != nil {
@@ -446,6 +456,12 @@ func main() {
 		fmt.Printf("> Internet endpoint: https://%s\n", tunnelURL)
 		fmt.Printf("> Local service: http://localhost:%d\n", ephemeralPort)
 		fmt.Printf("Press Ctrl+C to stop\n\n")
+		if showQR {
+			printQR("https://" + tunnelURL)
+		} else {
+			fmt.Printf("Want a QR code to easily open the tunnel endpoint on your phone?\n")
+			fmt.Printf(" - Hit Ctrl+C and paste \"rbite --resume --show-qr\" in your terminal.\n\n")
+		}
 	}
 
 	// Cancel the context on Ctrl-C so connectToTunnelServer returns cleanly.
@@ -937,6 +953,19 @@ func serverHostname(serverURL string) string {
 		return serverURL[7:]
 	}
 	return serverURL
+}
+
+// printQR prints a QR code of rawURL to stdout for easy phone scanning.
+func printQR(rawURL string) {
+	fmt.Println("Scan to open tunnel endpoint on your phone:\n")
+	qrterminal.GenerateWithConfig(rawURL, qrterminal.Config{
+		Level:     qrterminal.L,
+		Writer:    os.Stdout,
+		BlackChar: qrterminal.BLACK,
+		WhiteChar: qrterminal.WHITE,
+		QuietZone: 1,
+	})
+	fmt.Println()
 }
 
 // getEnv retrieves environment variable with fallback default value
