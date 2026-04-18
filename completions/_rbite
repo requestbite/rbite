@@ -1,0 +1,27 @@
+#compdef rbite
+# zsh completion for rbite
+# Place this file at:
+#   ~/.local/share/zsh/site-functions/_rbite
+
+_rbite() {
+    local -a args
+    args=(
+        '--login[Log in via browser]'
+        '--switch-accounts[Switch the active account]'
+        '--views-list[List all active inspector views for the current account]'
+        '--views-add[Create a new inspector view (name is optional)]:view name:'
+        '--views-tail[Stream live requests for a view (prompts for selection if no ID given)]:view id:'
+        '--views-open[Open a view capture URL in the browser (prompts for selection if no ID given)]:view id:'
+        '(-e --ephemeral)'{-e,--ephemeral}'[Port to expose via ephemeral tunnel]:port:'
+        '(-r --resume)'{-r,--resume}'[Resume the last tunnel session if not expired]'
+        '--show-qr[Print a QR code of the tunnel URL (use with -e or -r)]'
+        '--tunnel-server[Tunnel server URL]:url:'
+        '--no-upgrade-check[Disable automatic upgrade check on startup]'
+        '(-h --help)'{-h,--help}'[Show help information]'
+        '(-v --version)'{-v,--version}'[Show version and build information]'
+    )
+
+    _arguments -s $args
+}
+
+_rbite "$@"

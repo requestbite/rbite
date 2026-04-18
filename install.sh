@@ -351,18 +351,31 @@ install_completions() {
     fi
   fi
 
-  # Bash completion
-  local bash_completion_dir=""
-  if [ "$os" = "darwin" ]; then
-    # Prefer Homebrew location; fall back to user-level XDG path
-    if command_exists brew; then
-      bash_completion_dir="$(brew --prefix 2>/dev/null)/etc/bash_completion.d"
+  # Zsh completion
+  local zsh_completion_dir="$HOME/.local/share/zsh/site-functions"
+  if [ "$os" = "darwin" ] && command_exists brew; then
+    local brew_prefix
+    brew_prefix="$(brew --prefix 2>/dev/null)"
+    if [ -d "$brew_prefix/share/zsh/site-functions" ]; then
+      zsh_completion_dir="$brew_prefix/share/zsh/site-functions"
     fi
   fi
-  if [ -z "$bash_completion_dir" ]; then
-    bash_completion_dir="$HOME/.local/share/bash-completion/completions"
+  if [ -f "completions/_rbite" ]; then
+    mkdir -p "$zsh_completion_dir"
+    cp "completions/_rbite" "$zsh_completion_dir/_rbite"
+    success "Installed Zsh completion to $zsh_completion_dir/_rbite"
   fi
 
+  # Bash completion
+  local bash_completion_dir="$HOME/.local/share/bash-completion/completions"
+  if [ "$os" = "darwin" ] && command_exists brew; then
+    # Homebrew's user-writable site for bash completions (bash-completion@2)
+    local brew_prefix
+    brew_prefix="$(brew --prefix 2>/dev/null)"
+    if [ -d "$brew_prefix/share/bash-completion/completions" ]; then
+      bash_completion_dir="$brew_prefix/share/bash-completion/completions"
+    fi
+  fi
   if [ -f "completions/rbite.bash" ]; then
     mkdir -p "$bash_completion_dir"
     cp "completions/rbite.bash" "$bash_completion_dir/rbite"
@@ -409,32 +422,86 @@ verify_installation() {
   fi
 }
 
-# Check if install directory is in PATH
+# Detect the user's shell config file
+detect_shell_config() {
+  if [ -n "${FISH_VERSION:-}" ] || [[ "${SHELL:-}" == */fish ]]; then
+    echo "$HOME/.config/fish/config.fish"
+  elif [ -n "${ZSH_VERSION:-}" ] || [[ "${SHELL:-}" == */zsh ]]; then
+    echo "$HOME/.zshrc"
+  elif [ -n "${BASH_VERSION:-}" ] || [[ "${SHELL:-}" == */bash ]]; then
+    # Prefer .bash_profile on macOS (login shell), .bashrc on Linux
+    if [ -f "$HOME/.bash_profile" ]; then
+      echo "$HOME/.bash_profile"
+    else
+      echo "$HOME/.bashrc"
+    fi
+  else
+    echo ""
+  fi
+}
+
+# Check if install directory is in PATH; offer to add it interactively
 check_path() {
   local install_dir="$1"
 
-  if ! echo "$PATH" | grep -q "$install_dir"; then
-    warning "Installation directory is not in your PATH"
-    echo ""
-    echo "Add to PATH by adding this line to your shell configuration:"
+  # Already in PATH — nothing to do
+  if echo ":${PATH}:" | grep -q ":${install_dir}:"; then
+    return 0
+  fi
+
+  local shell_config
+  shell_config="$(detect_shell_config)"
+
+  local config_display="${shell_config/#$HOME/\~}"
+
+  if [ -z "$shell_config" ]; then
+    warning "$install_dir is not in your PATH"
+    echo "Add the following line to your shell configuration file:"
     echo "  export PATH=\"$install_dir:\$PATH\""
     echo ""
-
-    # Detect shell and config file
-    local shell_config=""
-    if [ -n "${BASH_VERSION:-}" ]; then
-      shell_config="~/.bashrc or ~/.bash_profile"
-    elif [ -n "${ZSH_VERSION:-}" ]; then
-      shell_config="~/.zshrc"
-    else
-      shell_config="your shell configuration file"
-    fi
-
-    echo "Example for $shell_config:"
-    echo "  echo 'export PATH=\"$install_dir:\$PATH\"' >> $shell_config"
-    echo "  source $shell_config"
-    echo ""
+    return 0
   fi
+
+  # Determine the export/set line for the detected shell
+  local export_line
+  if [[ "$shell_config" == */fish/config.fish ]]; then
+    export_line="fish_add_path $install_dir"
+  else
+    export_line="export PATH=\"$install_dir:\$PATH\""
+  fi
+
+  # Ask the user (default yes)
+  echo ""
+  printf "${COLOR_YELLOW}⚠${COLOR_RESET} ${COLOR_BOLD}rbite${COLOR_RESET} is not in your PATH."
+  echo ""
+  printf "  Should I add ${COLOR_BOLD}$install_dir${COLOR_RESET} to ${COLOR_BOLD}$config_display${COLOR_RESET}? [Y/n] "
+
+  # Read from /dev/tty so it works even when script is piped from curl
+  local answer
+  if read -r answer </dev/tty 2>/dev/null; then
+    : # got input
+  else
+    answer="n"
+  fi
+
+  case "${answer:-Y}" in
+    [Yy]* | "")
+      echo "" >> "$shell_config"
+      echo "# Added by rbite installer" >> "$shell_config"
+      echo "$export_line" >> "$shell_config"
+      success "Added to $config_display"
+
+      # Update PATH in the current shell session
+      export PATH="$install_dir:$PATH"
+      success "Updated PATH for this session — $BINARY_NAME is ready to use now"
+      ;;
+    *)
+      warning "Skipped. Add the following line to $config_display manually:"
+      echo "  $export_line"
+      echo "Then restart your shell or run:  source $shell_config"
+      echo ""
+      ;;
+  esac
 }
 
 # Main installation function
