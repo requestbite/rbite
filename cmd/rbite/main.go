@@ -1400,15 +1400,14 @@ func ensureAuthenticated(apiURL string) (*Config, error) {
 // authedGet performs a GET request with a Bearer token, retrying once after a
 // token refresh if the server returns 401.
 func authedGet(apiURL, path, accessToken string, cfg *Config) (*http.Response, error) {
+	client := &http.Client{Timeout: 10 * time.Second}
 	doRequest := func(token string) (*http.Response, error) {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		req, err := http.NewRequestWithContext(ctx, "GET", strings.TrimRight(apiURL, "/")+path, nil)
+		req, err := http.NewRequest("GET", strings.TrimRight(apiURL, "/")+path, nil)
 		if err != nil {
 			return nil, err
 		}
 		req.Header.Set("Authorization", "Bearer "+token)
-		return http.DefaultClient.Do(req)
+		return client.Do(req)
 	}
 
 	resp, err := doRequest(accessToken)
@@ -1439,16 +1438,15 @@ func authedGet(apiURL, path, accessToken string, cfg *Config) (*http.Response, e
 // authedPost performs a POST request with a Bearer token, retrying once after a
 // token refresh if the server returns 401.
 func authedPost(apiURL, path, accessToken string, body []byte, cfg *Config) (*http.Response, error) {
+	client := &http.Client{Timeout: 10 * time.Second}
 	doRequest := func(token string) (*http.Response, error) {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		req, err := http.NewRequestWithContext(ctx, "POST", strings.TrimRight(apiURL, "/")+path, bytes.NewReader(body))
+		req, err := http.NewRequest("POST", strings.TrimRight(apiURL, "/")+path, bytes.NewReader(body))
 		if err != nil {
 			return nil, err
 		}
 		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("Content-Type", "application/json")
-		return http.DefaultClient.Do(req)
+		return client.Do(req)
 	}
 
 	resp, err := doRequest(accessToken)
