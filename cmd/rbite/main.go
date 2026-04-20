@@ -644,12 +644,16 @@ func runUninstall() {
 	completionFiles := []string{
 		filepath.Join(home, ".config", "fish", "completions", "rbite.fish"),
 		filepath.Join(home, ".local", "share", "bash-completion", "completions", "rbite"),
+		filepath.Join(home, ".local", "share", "zsh", "site-functions", "_rbite"),
 	}
-	// On macOS, also check the Homebrew bash-completion directory.
+	// On macOS, also check the Homebrew completion directories.
 	if runtime.GOOS == "darwin" {
 		if out, err := exec.Command("brew", "--prefix").Output(); err == nil {
 			brewPrefix := strings.TrimSpace(string(out))
-			completionFiles = append(completionFiles, filepath.Join(brewPrefix, "etc", "bash_completion.d", "rbite"))
+			completionFiles = append(completionFiles,
+				filepath.Join(brewPrefix, "share", "bash-completion", "completions", "rbite"),
+				filepath.Join(brewPrefix, "share", "zsh", "site-functions", "_rbite"),
+			)
 		}
 	}
 	var foundCompletions []string
