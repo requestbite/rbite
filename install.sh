@@ -12,6 +12,7 @@ set -euo pipefail
 
 # Configuration
 BINARY_NAME="rbite"
+PROXY_NAME="rbite-proxy"
 GITHUB_REPO="requestbite/rbite"
 DEFAULT_INSTALL_DIR="$HOME/.local/bin"
 
@@ -84,7 +85,7 @@ fi
 
 # Utility functions
 info() {
-  echo -e "${COLOR_BOLD}${COLOR_BLUE}==>${COLOR_RESET} ${COLOR_BOLD}$*${COLOR_RESET}"
+  echo -e "\n${COLOR_BOLD}${COLOR_BLUE}==>${COLOR_RESET} ${COLOR_BOLD}$*${COLOR_RESET}"
 }
 
 success() {
@@ -232,25 +233,19 @@ download_and_verify() {
   local archive_name="$2"
   local checksum_url="$3"
 
-  info "Downloading from GitHub releases..."
   if ! curl -fsSL --progress-bar "$url" -o "$archive_name"; then
     die "Failed to download $url"
   fi
   success "Downloaded $archive_name"
 
-  # Download checksums
-  info "Verifying checksum..."
-  if ! curl -fsSL "$checksum_url" -o SHA256SUMS; then
-    warning "Could not download checksums file, skipping verification"
+  if ! curl -fsSL "$checksum_url" -o SHA256SUMS 2>/dev/null; then
     return 0
   fi
 
-  # Verify checksum
   local expected_checksum
   expected_checksum=$(grep "$archive_name" SHA256SUMS | awk '{print $1}')
 
   if [ -z "$expected_checksum" ]; then
-    warning "Checksum not found in SHA256SUMS, skipping verification"
     return 0
   fi
 
@@ -266,15 +261,11 @@ download_and_verify() {
 Expected: $expected_checksum
 Actual:   $actual_checksum"
   fi
-
-  success "Checksum verified"
 }
 
 # Extract archive contents
 extract_binary() {
   local archive_name="$1"
-
-  info "Extracting archive..."
 
   if [[ "$archive_name" == *.tar.gz ]]; then
     tar -xzf "$archive_name"
@@ -282,7 +273,6 @@ extract_binary() {
       die "Binary not found in archive"
     fi
     mv "$BINARY_NAME/$BINARY_NAME" "${BINARY_NAME}.tmp"
-    # Keep completions/ and man/ directories in place for later installation
     if [ -d "$BINARY_NAME/completions" ]; then
       mv "$BINARY_NAME/completions" completions
     fi
@@ -294,8 +284,6 @@ extract_binary() {
   else
     die "Unsupported archive format: $archive_name"
   fi
-
-  success "Extracted archive"
 }
 
 # Install binary
@@ -315,7 +303,7 @@ install_binary() {
     use_sudo=true
   fi
 
-  info "Installing to $install_dir..."
+  info "Installing $BINARY_NAME $VERSION:"
 
   if [ "$use_sudo" = true ]; then
     warning "Installation requires elevated privileges"
@@ -337,7 +325,7 @@ install_binary() {
   success "Installed $BINARY_NAME to $install_dir"
 }
 
-# Install shell completions
+# Install shell completions and man page
 install_completions() {
   local os="$1"
 
@@ -366,10 +354,22 @@ install_completions() {
     success "Installed Zsh completion to $zsh_completion_dir/_rbite"
   fi
 
+  # Man page
+  local man_dir="$HOME/.local/share/man/man1"
+  if [ -f "man/rbite.1" ]; then
+    mkdir -p "$man_dir"
+    cp "man/rbite.1" "$man_dir/rbite.1"
+    success "Installed man page to $man_dir/rbite.1"
+    if command_exists mandb; then
+      mandb -q "$HOME/.local/share/man" 2>/dev/null || true
+    elif command_exists makewhatis; then
+      makewhatis "$HOME/.local/share/man" 2>/dev/null || true
+    fi
+  fi
+
   # Bash completion
   local bash_completion_dir="$HOME/.local/share/bash-completion/completions"
   if [ "$os" = "darwin" ] && command_exists brew; then
-    # Homebrew's user-writable site for bash completions (bash-completion@2)
     local brew_prefix
     brew_prefix="$(brew --prefix 2>/dev/null)"
     if [ -d "$brew_prefix/share/bash-completion/completions" ]; then
@@ -383,22 +383,86 @@ install_completions() {
   fi
 }
 
-# Install man page
-install_man_page() {
-  local man_dir="$HOME/.local/share/man/man1"
+# Download and extract rbite-proxy (sets PROXY_VERSION; stores binary as rbite-proxy.bin)
+PROXY_VERSION=""
+download_companion() {
+  local os="$1"
+  local arch="$2"
 
-  if [ -f "man/rbite.1" ]; then
-    mkdir -p "$man_dir"
-    cp "man/rbite.1" "$man_dir/rbite.1"
-    success "Installed man page to $man_dir/rbite.1"
+  local companion="rbite-proxy"
+  local companion_repo="requestbite/proxy"
 
-    # Rebuild the manual page index when tools are available
-    if command_exists mandb; then
-      mandb -q "$HOME/.local/share/man" 2>/dev/null || true
-    elif command_exists makewhatis; then
-      makewhatis "$HOME/.local/share/man" 2>/dev/null || true
+  PROXY_VERSION=$(curl -fsSL -H "User-Agent: rbite-installer" \
+    "https://api.github.com/repos/${companion_repo}/releases/latest" |
+    grep '"tag_name"' |
+    sed -E 's/.*"tag_name": *"v?([^"]+)".*/\1/' || echo "")
+
+  if [ -z "$PROXY_VERSION" ]; then
+    warning "Could not fetch latest version of $companion — skipping"
+    return 0
+  fi
+
+  local archive="${companion}-${PROXY_VERSION}-${os}-${arch}.tar.gz"
+  local base_url="https://github.com/${companion_repo}/releases/download/${PROXY_VERSION}"
+
+  if ! curl -fsSL --progress-bar "${base_url}/${archive}" -o "$archive"; then
+    warning "Failed to download $companion — skipping"
+    PROXY_VERSION=""
+    return 0
+  fi
+  success "Downloaded $archive"
+
+  if curl -fsSL "${base_url}/SHA256SUMS" -o "SHA256SUMS.proxy" 2>/dev/null; then
+    local expected actual
+    expected=$(grep "$archive" SHA256SUMS.proxy | awk '{print $1}')
+    if [ -n "$expected" ]; then
+      if command_exists shasum; then
+        actual=$(shasum -a 256 "$archive" | awk '{print $1}')
+      else
+        actual=$(sha256sum "$archive" | awk '{print $1}')
+      fi
+      if [ "$expected" != "$actual" ]; then
+        warning "$companion checksum mismatch — skipping"
+        PROXY_VERSION=""
+        return 0
+      fi
     fi
   fi
+
+  tar -xzf "$archive"
+  if [ ! -f "$companion/$companion" ]; then
+    warning "$companion binary not found in archive — skipping"
+    PROXY_VERSION=""
+    return 0
+  fi
+  mv "$companion/$companion" "${companion}.bin"
+  rm -rf "$companion"
+}
+
+# Install pre-downloaded rbite-proxy binary
+install_companion() {
+  local install_dir="$1"
+
+  [ -z "$PROXY_VERSION" ] && return 0
+
+  local companion="rbite-proxy"
+
+  info "Installing $companion $PROXY_VERSION:"
+
+  local use_sudo=false
+  if ! is_writable "$install_dir"; then
+    use_sudo=true
+  fi
+
+  if [ "$use_sudo" = true ]; then
+    sudo cp "${companion}.bin" "$install_dir/$companion"
+    sudo chmod +x "$install_dir/$companion"
+  else
+    cp "${companion}.bin" "$install_dir/$companion"
+    chmod +x "$install_dir/$companion"
+  fi
+
+  success "Installed $companion to $install_dir"
 }
 
 # Verify installation
@@ -485,28 +549,27 @@ check_path() {
   fi
 
   case "${answer:-Y}" in
-    [Yy]* | "")
-      echo "" >> "$shell_config"
-      echo "# Added by rbite installer" >> "$shell_config"
-      echo "$export_line" >> "$shell_config"
-      success "Added to $config_display"
+  [Yy]* | "")
+    echo "" >>"$shell_config"
+    echo "# Added by rbite installer" >>"$shell_config"
+    echo "$export_line" >>"$shell_config"
+    success "Added to $config_display"
 
-      # Update PATH in the current shell session
-      export PATH="$install_dir:$PATH"
-      success "Updated PATH for this session — $BINARY_NAME is ready to use now"
-      ;;
-    *)
-      warning "Skipped. Add the following line to $config_display manually:"
-      echo "  $export_line"
-      echo "Then restart your shell or run:  source $shell_config"
-      echo ""
-      ;;
+    # Update PATH in the current shell session
+    export PATH="$install_dir:$PATH"
+    success "Updated PATH for this session — $BINARY_NAME is ready to use now"
+    ;;
+  *)
+    warning "Skipped. Add the following line to $config_display manually:"
+    echo "  $export_line"
+    echo "Then restart your shell or run:  source $shell_config"
+    echo ""
+    ;;
   esac
 }
 
 # Main installation function
 main() {
-  echo ""
   info "rbite - Installation Script"
   echo ""
 
@@ -525,13 +588,11 @@ main() {
   if [ -z "$VERSION" ]; then
     VERSION=$(get_latest_version)
   fi
-  echo "Version: $VERSION"
 
   # Determine installation directory
   local install_dir
   install_dir=$(determine_install_dir)
   echo "Install directory: $install_dir"
-  echo ""
 
   # Construct download URL
   local archive_name="${BINARY_NAME}-${VERSION}-${os}-${arch}.tar.gz"
@@ -543,20 +604,20 @@ main() {
   TEMP_DIR=$(mktemp -d)
   cd "$TEMP_DIR"
 
-  # Download and verify
+  # Download everything first
+  info "Downloading from GitHub releases..."
   download_and_verify "$download_url" "$archive_name" "$checksum_url"
+  download_companion "$os" "$arch"
 
-  # Extract
+  # Extract rbite
   extract_binary "$archive_name"
 
-  # Install
+  # Install rbite (binary + completions + man page)
   install_binary "$install_dir"
-
-  # Install shell completions
   install_completions "$os"
 
-  # Install man page
-  install_man_page
+  # Install rbite-proxy
+  install_companion "$install_dir"
 
   # Verify
   verify_installation "$install_dir"
@@ -572,6 +633,9 @@ main() {
   echo "Usage:"
   echo "  $BINARY_NAME --help"
   echo "  $BINARY_NAME --version"
+  echo ""
+  echo "  $PROXY_NAME --help"
+  echo "  $PROXY_NAME --version"
   echo ""
 }
 
