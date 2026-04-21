@@ -15,9 +15,10 @@ a locally running service from across the Internet.
 
 ## Installation
 
-### Quick Install (Recommended)
+### Quick Install
 
-Install the latest release on MacOS or Linux like so:
+Install the latest release on MacOS or Linux like so (it also installs the
+companion app [rbite-proxy](https://github.com/requestbite/proxy):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/requestbite/rbite/main/install.sh | bash
@@ -40,6 +41,9 @@ To install a specific version (in this example, version 0.3.1), do like so:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/requestbite/rbite/main/install.sh | bash -s -- --version 0.3.1
 ```
+
+Please note that this only affects the `rbite` app, not the companion
+`rbite-proxy` app.
 
 ### Manual Download
 
