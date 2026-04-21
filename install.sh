@@ -39,7 +39,7 @@ Usage:
 
 Options:
   --version VERSION    Install specific version (e.g., 0.0.1)
-  --prefix PATH        Install to PATH/bin (default: ~/.local/bin)
+  --prefix PATH        Install to PATH (default: ~/.local/bin)
   --help               Show this help message
 
 Examples:
@@ -201,7 +201,7 @@ determine_install_dir() {
   local install_dir
 
   if [ -n "$PREFIX" ]; then
-    install_dir="$PREFIX/bin"
+    install_dir="$PREFIX"
   elif [ -d "$DEFAULT_INSTALL_DIR" ] || mkdir -p "$DEFAULT_INSTALL_DIR" 2>/dev/null; then
     install_dir="$DEFAULT_INSTALL_DIR"
   else
