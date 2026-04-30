@@ -59,6 +59,11 @@ type Config struct {
 	AccessToken  string `yaml:"accessToken,omitempty"`
 	RefreshToken string `yaml:"refreshToken,omitempty"`
 	AccountID    string `yaml:"accountId,omitempty"`
+
+	// Persistent tunnel resume state
+	LastSessionType string `yaml:"lastSessionType,omitempty"` // "ephemeral" or "permanent"
+	LastTunnelID    string `yaml:"lastTunnelId,omitempty"`
+	LastLocalPort   int    `yaml:"lastLocalPort,omitempty"`
 }
 
 // configPath returns the absolute path to ~/.config/rbite/config.yaml.
@@ -189,7 +194,8 @@ func printHelp() {
   fmt.Printf("      --views-open [view ID]  Open a view's capture URL in the browser (prompts if no ID given)\n")
 	fmt.Println("\nTunnel Mgmt\n===========")
 	fmt.Printf("  -e, --ephemeral int         Port to expose via ephemeral tunnel\n")
-  fmt.Printf("  -r, --resume                Resume the last tunnel session if not expired\n")
+  fmt.Printf("  -t, --tunnel string         Connect a permanent tunnel by ID (requires -e <local-port>)\n")
+  fmt.Printf("  -r, --resume                Resume the last tunnel session (ephemeral or permanent)\n")
   fmt.Printf("      --show-qr               Print a QR code of the tunnel URL (use with -e or -r)\n")
   fmt.Printf("      --tunnel-server string  Tunnel server URL (default %q)\n", defaultServer)
 	fmt.Println("\nOther\n=====")
@@ -210,6 +216,7 @@ func main() {
 	// Command line flags
 	var (
 		ephemeralPort  int
+		tunnelID       string
 		showVersion    bool
 		showHelp       bool
 		resume         bool
@@ -228,6 +235,8 @@ func main() {
 
 	flag.IntVar(&ephemeralPort, "e", 0, "")
 	flag.IntVar(&ephemeralPort, "ephemeral", 0, "")
+	flag.StringVar(&tunnelID, "t", "", "")
+	flag.StringVar(&tunnelID, "tunnel", "", "")
 	flag.BoolVar(&showVersion, "v", false, "")
 	flag.BoolVar(&showVersion, "version", false, "")
 	flag.BoolVar(&showHelp, "h", false, "")
@@ -388,19 +397,43 @@ func main() {
 		checkForUpdates()
 	}
 
-	// Validate flags
-	if resume && ephemeralPort != 0 {
-		log.Fatal("Error: --resume and --ephemeral cannot be used together")
+	cfg, err := loadOrCreateConfig()
+	if err != nil {
+		log.Fatalf("Failed to load config: %v", err)
 	}
+
+	apiURL := resolveAPIURL(serverURL)
+
+	// ── Permanent tunnel ──────────────────────────────────────────────────────
+	if tunnelID != "" {
+		if ephemeralPort == 0 {
+			log.Fatal("Error: --tunnel requires -e <local-port> to specify where to forward traffic")
+		}
+		if resume {
+			log.Fatal("Error: --tunnel and --resume cannot be used together; use --resume alone to reconnect the last session")
+		}
+		runPermanentTunnel(serverURL, apiURL, tunnelID, ephemeralPort, showQR, cfg)
+		os.Exit(0)
+	}
+
+	// ── Resume ────────────────────────────────────────────────────────────────
+	if resume {
+		if cfg.LastSessionType == "permanent" && cfg.LastTunnelID != "" && cfg.LastLocalPort != 0 {
+			runPermanentTunnel(serverURL, apiURL, cfg.LastTunnelID, cfg.LastLocalPort, showQR, cfg)
+			os.Exit(0)
+		}
+		// Fall through to ephemeral resume.
+		if ephemeralPort != 0 {
+			log.Fatal("Error: --resume and --ephemeral cannot be used together")
+		}
+	}
+
+	// ── Ephemeral tunnel ──────────────────────────────────────────────────────
 	if !resume && ephemeralPort == 0 {
 		printHelp()
 		os.Exit(0)
 	}
 
-	cfg, err := loadOrCreateConfig()
-	if err != nil {
-		log.Fatalf("Failed to load config: %v", err)
-	}
 	clientID := cfg.ClientID
 
 	var tunnelURL string
@@ -462,6 +495,12 @@ func main() {
 			fmt.Printf("Want a QR code to easily open the tunnel endpoint on your phone?\n")
 			fmt.Printf(" - Hit Ctrl+C and paste \"rbite --resume --show-qr\" in your terminal.\n\n")
 		}
+
+		// Persist ephemeral as last session so --resume works next time.
+		cfg.LastSessionType = "ephemeral"
+		cfg.LastTunnelID = ""
+		cfg.LastLocalPort = ephemeralPort
+		_ = saveConfig(cfg)
 	}
 
 	// Cancel the context on Ctrl-C so connectToTunnelServer returns cleanly.
@@ -2106,4 +2145,145 @@ func streamSSE(ctx context.Context, apiURL, path string, cfg *Config) error {
 		return fmt.Errorf("SSE stream error: %w", err)
 	}
 	return nil
+}
+
+// ── Permanent tunnel support ──────────────────────────────────────────────────
+
+// tunnelDetails holds the fields returned by the API for a permanent tunnel.
+type tunnelDetails struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	PublicURL string `json:"publicUrl"`
+	Token     string `json:"token"`
+	Ports     []int  `json:"ports"`
+	Enabled   bool   `json:"enabled"`
+}
+
+// fetchTunnelDetails retrieves a permanent tunnel's config from the requestbite API.
+func fetchTunnelDetails(apiURL, accountID, tID string, cfg *Config) (*tunnelDetails, error) {
+	resp, err := authedGet(apiURL, "/v1/accounts/"+accountID+"/tunnels/"+tID, cfg.AccessToken, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch tunnel: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("tunnel %s not found (check the tunnel ID and account)", tID)
+	}
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("tunnel endpoint returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var t tunnelDetails
+	if err := json.NewDecoder(resp.Body).Decode(&t); err != nil {
+		return nil, fmt.Errorf("could not parse tunnel response: %w", err)
+	}
+	if t.Token == "" {
+		return nil, fmt.Errorf("tunnel response did not contain a token — try regenerating the tunnel")
+	}
+	return &t, nil
+}
+
+// runPermanentTunnel orchestrates fetching tunnel details, printing status, and
+// connecting to the tunnel server.  It saves resume state to config before
+// connecting so that --resume works even if the process is interrupted.
+func runPermanentTunnel(serverURL, apiURL, tID string, localPort int, showQR bool, cfg *Config) {
+	if cfg.AccountID == "" {
+		log.Fatal("No account selected — run: rbite --switch-accounts")
+	}
+
+	details, err := fetchTunnelDetails(apiURL, cfg.AccountID, tID, cfg)
+	if err != nil {
+		log.Fatalf("Could not fetch tunnel details: %v", err)
+	}
+	if !details.Enabled {
+		log.Fatalf("Tunnel %q is disabled — enable it via the dashboard or API before connecting.", details.Name)
+	}
+
+	fmt.Printf("\n%s\n", tunnelArt)
+	fmt.Printf("Permanent tunnel %q connected.\n", details.Name)
+	fmt.Printf("> Internet endpoint: %s\n", details.PublicURL)
+	if len(details.Ports) > 0 {
+		fmt.Printf("> Allowed ports:     %v\n", details.Ports)
+	}
+	fmt.Printf("> Local service:    http://localhost:%d\n", localPort)
+	fmt.Printf("Press Ctrl+C to stop\n\n")
+	if showQR {
+		printQR(details.PublicURL)
+	}
+
+	// Persist resume state before blocking so Ctrl+C restarts cleanly.
+	cfg.LastSessionType = "permanent"
+	cfg.LastTunnelID = tID
+	cfg.LastLocalPort = localPort
+	_ = saveConfig(cfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt)
+	go func() {
+		<-sigCh
+		fmt.Println()
+		cancel()
+	}()
+
+	localAddr := fmt.Sprintf("localhost:%d", localPort)
+	connectPermanentToTunnelServer(ctx, serverURL, tID, details.Token, localAddr)
+}
+
+// connectPermanentToTunnelServer opens a yamux-over-WebSocket connection to the
+// tunnel server for a permanent tunnel.  Unlike ephemeral tunnels there is no
+// expiry timer — the connection runs until the context is cancelled or the
+// server closes the session.
+func connectPermanentToTunnelServer(ctx context.Context, serverURL, tID, token, localAddr string) {
+	muxURL := toWSURL(serverURL) + "/tunnel/mux?client_id=" + url.QueryEscape(tID) + "&token=" + url.QueryEscape(token)
+	ws, resp, err := websocket.DefaultDialer.Dial(muxURL, nil)
+	if err != nil {
+		if resp != nil {
+			if resp.StatusCode == http.StatusUnauthorized {
+				log.Fatalf("tunnel server rejected the connection: invalid token (try fetching fresh tunnel details)")
+			}
+			if resp.StatusCode == http.StatusConflict {
+				log.Fatalf("tunnel is already active elsewhere — disconnect the other client first")
+			}
+			log.Fatalf("mux dial failed (HTTP %d): %v", resp.StatusCode, err)
+		}
+		log.Fatalf("mux dial failed: %v", err)
+	}
+	defer ws.Close()
+
+	session, err := yamux.Server(newWSConn(ws), nil)
+	if err != nil {
+		log.Fatalf("yamux session failed: %v", err)
+	}
+	defer session.Close()
+
+	log.Printf("Connected to tunnel server, waiting for connections...")
+
+	streamCh := make(chan net.Conn)
+	errCh := make(chan error, 1)
+	go func() {
+		for {
+			stream, err := session.Accept()
+			if err != nil {
+				errCh <- err
+				return
+			}
+			streamCh <- stream
+		}
+	}()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case err := <-errCh:
+			log.Printf("mux session closed: %v", err)
+			return
+		case stream := <-streamCh:
+			go handleTunneledConnection(stream, localAddr)
+		}
+	}
 }
