@@ -54,10 +54,16 @@ COLOR_GREEN := \033[32m
 COLOR_BLUE := \033[34m
 COLOR_YELLOW := \033[33m
 
-.PHONY: all build build-all release clean install dev help
+.PHONY: all build build-all release clean install dev build-web help
 
 # Default target
 all: build
+
+# Build the file-browser web assets (requires Node.js + npm)
+build-web:
+	@echo "$(COLOR_BOLD)$(COLOR_BLUE)Building file browser web assets...$(COLOR_RESET)"
+	@cd web && npm install --silent && node build.js
+	@echo "$(COLOR_GREEN)✓ Web assets built: cmd/rbite/web/index.html$(COLOR_RESET)"
 
 # Build for current platform (development)
 build:
@@ -189,6 +195,7 @@ help:
 	@echo "  make [target]"
 	@echo ""
 	@echo "$(COLOR_BOLD)Targets:$(COLOR_RESET)"
+	@echo "  build-web  - Build file browser web assets (requires Node.js)"
 	@echo "  build      - Build for current platform (default)"
 	@echo "  dev        - Run with hot reload using Air (for development)"
 	@echo "  build-all  - Build for all platforms (darwin/amd64, darwin/arm64, linux/amd64, windows/amd64)"

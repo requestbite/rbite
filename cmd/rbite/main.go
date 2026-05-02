@@ -38,6 +38,9 @@ import (
 //go:embed tunnel-art.txt
 var tunnelArt string
 
+//go:embed web/index.html
+var fileServerHTML string
+
 // errSessionExpired is returned when the refresh token is also invalid, requiring re-login.
 var errSessionExpired = errors.New("session expired")
 
@@ -200,6 +203,7 @@ func printHelp() {
   fmt.Printf("      --views-tail [view ID]  Stream live requests for a view (prompts if no ID given)\n")
   fmt.Printf("      --views-open [view ID]  Open a view's capture URL in the browser (prompts if no ID given)\n")
 	fmt.Println("\nTunnel Mgmt\n===========")
+	fmt.Printf("  -f, --files string          Share a local directory via ephemeral tunnel (built-in file browser)\n")
 	fmt.Printf("  -e, --ephemeral int         Port to expose via ephemeral tunnel; overrides dynamic routing for -t\n")
   fmt.Printf("  -t, --tunnel string         Connect a permanent tunnel by ID\n")
   fmt.Printf("  -r, --resume                Resume the last tunnel session (ephemeral or permanent)\n")
@@ -210,6 +214,193 @@ func printHelp() {
   fmt.Printf("      --uninstall             Uninstall rbite\n")
 	fmt.Printf("  -h, --help                  Show help information\n")
 	fmt.Printf("  -v, --version               Show version information\n")
+}
+
+// safePath validates that relPath stays within rootPath and returns the absolute path.
+func safePath(rootPath, relPath string) (string, error) {
+	if strings.ContainsRune(relPath, 0) {
+		return "", fmt.Errorf("invalid path")
+	}
+	clean := filepath.Clean(relPath)
+	joined := filepath.Join(rootPath, clean)
+	rel, err := filepath.Rel(rootPath, joined)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return "", fmt.Errorf("path traversal not allowed")
+	}
+	return joined, nil
+}
+
+type fileEntry struct {
+	Name    string    `json:"name"`
+	IsDir   bool      `json:"isDir"`
+	Size    int64     `json:"size"`
+	ModTime time.Time `json:"modTime"`
+}
+
+func fileListHandler(rootPath string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		rel := r.URL.Query().Get("path")
+		abs, err := safePath(rootPath, rel)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		info, err := os.Stat(abs)
+		if os.IsNotExist(err) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		if err != nil || !info.IsDir() {
+			http.Error(w, "not a directory", http.StatusBadRequest)
+			return
+		}
+		dirEntries, err := os.ReadDir(abs)
+		if err != nil {
+			http.Error(w, "cannot read directory", http.StatusInternalServerError)
+			return
+		}
+		entries := make([]fileEntry, 0, len(dirEntries))
+		for _, de := range dirEntries {
+			fi, err := de.Info()
+			if err != nil {
+				continue
+			}
+			entries = append(entries, fileEntry{
+				Name:    de.Name(),
+				IsDir:   de.IsDir(),
+				Size:    fi.Size(),
+				ModTime: fi.ModTime(),
+			})
+		}
+		sort.Slice(entries, func(i, j int) bool {
+			if entries[i].IsDir != entries[j].IsDir {
+				return entries[i].IsDir
+			}
+			return strings.ToLower(entries[i].Name) < strings.ToLower(entries[j].Name)
+		})
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"path": rel, "entries": entries})
+	}
+}
+
+func fileDownloadHandler(rootPath string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		rel := r.URL.Query().Get("path")
+		abs, err := safePath(rootPath, rel)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		info, err := os.Stat(abs)
+		if os.IsNotExist(err) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		if err != nil || info.IsDir() {
+			http.Error(w, "not a file", http.StatusBadRequest)
+			return
+		}
+		f, err := os.Open(abs)
+		if err != nil {
+			http.Error(w, "cannot open file", http.StatusInternalServerError)
+			return
+		}
+		defer f.Close()
+		w.Header().Set("Content-Disposition", `attachment; filename="`+filepath.Base(abs)+`"`)
+		http.ServeContent(w, r, filepath.Base(abs), info.ModTime(), f)
+	}
+}
+
+func startFileHTTPServer(rootPath string) (net.Listener, error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, err
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/ls", fileListHandler(rootPath))
+	mux.HandleFunc("/api/download", fileDownloadHandler(rootPath))
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprint(w, fileServerHTML)
+	})
+	srv := &http.Server{Handler: mux}
+	go srv.Serve(ln) //nolint:errcheck
+	return ln, nil
+}
+
+func runFileServer(rootPath string, showQR bool, serverURL string) error {
+	absRoot, err := filepath.Abs(rootPath)
+	if err != nil {
+		return fmt.Errorf("invalid path: %w", err)
+	}
+	info, err := os.Stat(absRoot)
+	if os.IsNotExist(err) {
+		return fmt.Errorf("path does not exist: %s", absRoot)
+	}
+	if err != nil {
+		return fmt.Errorf("cannot access path: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s is a file, not a directory; pass a directory path", absRoot)
+	}
+
+	cfg, err := loadOrCreateConfig()
+	if err != nil {
+		return err
+	}
+
+	ln, err := startFileHTTPServer(absRoot)
+	if err != nil {
+		return fmt.Errorf("could not start file server: %w", err)
+	}
+	defer ln.Close()
+
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	ephemeralResp, err := createEphemeralTunnel(serverURL, port, cfg.ClientID)
+	if err != nil {
+		if errors.Is(err, errSessionConflict) {
+			return fmt.Errorf("this client already has a session open. Only 1 ephemeral session is possible at once")
+		}
+		return fmt.Errorf("failed to create ephemeral tunnel: %w", err)
+	}
+
+	tunnelURL := ephemeralResp.URL
+	expiresAt := ephemeralResp.ExpiresAt
+	expiresIn := int(time.Until(expiresAt).Minutes())
+	if time.Until(expiresAt) > time.Duration(expiresIn)*time.Minute {
+		expiresIn++
+	}
+
+	fmt.Printf("\n%s\n", tunnelArt)
+	fmt.Printf("Sharing directory: %s\n", absRoot)
+	fmt.Printf("Ephemeral tunnel created. Expires at %s (in %d minutes).\n", expiresAt.Local().Format("15:04:05"), expiresIn)
+	fmt.Printf("> File browser: https://%s\n", tunnelURL)
+	fmt.Printf("Press Ctrl+C to stop\n\n")
+
+	if showQR {
+		printQR("https://" + tunnelURL)
+	}
+
+	cfg.LastSessionType = "ephemeral"
+	cfg.LastTunnelID = ""
+	cfg.LastLocalPort = port
+	_ = saveConfig(cfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt)
+	go func() {
+		<-sigCh
+		fmt.Println()
+		cancel()
+	}()
+
+	localAddr := fmt.Sprintf("localhost:%d", port)
+	connectToTunnelServer(ctx, serverURL, cfg.ClientID, localAddr, expiresAt)
+	printSessionStats(serverURL, cfg.ClientID)
+	return nil
 }
 
 func main() {
@@ -238,6 +429,7 @@ func main() {
 		openViewID     string
 		addViewName    string
 		showQR         bool
+		filesPath      string
 	)
 	defaultServer := buildDefaultServerURL()
 
@@ -255,6 +447,8 @@ func main() {
 	flag.BoolVar(&noUpgradeCheck, "no-upgrade-check", false, "")
 	flag.BoolVar(&uninstall, "uninstall", false, "")
 	flag.BoolVar(&showQR, "show-qr", false, "")
+	flag.StringVar(&filesPath, "f", "", "")
+	flag.StringVar(&filesPath, "files", "", "")
 	flag.BoolVar(&loginMode, "login", false, "")
 	flag.BoolVar(&switchAccounts, "switch-accounts", false, "")
 	flag.BoolVar(&whoami, "whoami", false, "")
@@ -406,6 +600,20 @@ func main() {
 		apiURL := resolveAPIURL(serverURL)
 		if err := runWhoami(apiURL); err != nil {
 			log.Fatalf("whoami failed: %v", err)
+		}
+		os.Exit(0)
+	}
+
+	// File share
+	if filesPath != "" {
+		if ephemeralPort != 0 || resume {
+			log.Fatal("Error: -f/--files cannot be used together with -e/--ephemeral or --resume")
+		}
+		if !noUpgradeCheck && !isRunningInDevelopment() {
+			checkForUpdates()
+		}
+		if err := runFileServer(filesPath, showQR, serverURL); err != nil {
+			log.Fatalf("File server failed: %v", err)
 		}
 		os.Exit(0)
 	}
