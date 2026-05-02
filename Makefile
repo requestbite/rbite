@@ -1,6 +1,9 @@
 # RequestBite rbite Makefile
 # Cross-platform build automation for macOS, Linux, and Windows
 
+-include .env
+export
+
 # Extract version from git tag (strip 'v' prefix), fallback to "dev"
 # If on exact tag like v1.2.3, VERSION = 1.2.3
 # If ahead of tag, VERSION = 1.2.3-abc1234 (tag-commit)

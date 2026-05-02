@@ -158,9 +158,15 @@ type ActiveSessionResponse struct {
 // env var, then falls back to localhost for local development.
 func buildDefaultServerURL() string {
 	if DefaultAPIHostname != "" {
+		if strings.HasPrefix(DefaultAPIHostname, "http://") || strings.HasPrefix(DefaultAPIHostname, "https://") {
+			return DefaultAPIHostname
+		}
 		return "https://" + DefaultAPIHostname
 	}
 	if h := getEnv("API_HOSTNAME", ""); h != "" {
+		if strings.HasPrefix(h, "http://") || strings.HasPrefix(h, "https://") {
+			return h
+		}
 		return "https://" + h
 	}
 	return "http://localhost:8080"
@@ -187,14 +193,15 @@ func printHelp() {
 	fmt.Println("\nAccount Mgmt\n============")
   fmt.Printf("      --login                 Log in via browser\n")
   fmt.Printf("      --switch-accounts       Switch the active account\n")
+  fmt.Printf("      --whoami                Show logged-in user and account details\n")
 	fmt.Println("\nRequest Views\n=============")
   fmt.Printf("      --views-list            List active inspector views for the current account\n")
   fmt.Printf("      --views-add [name]      Create a new inspector view (name is optional)\n")
   fmt.Printf("      --views-tail [view ID]  Stream live requests for a view (prompts if no ID given)\n")
   fmt.Printf("      --views-open [view ID]  Open a view's capture URL in the browser (prompts if no ID given)\n")
 	fmt.Println("\nTunnel Mgmt\n===========")
-	fmt.Printf("  -e, --ephemeral int         Port to expose via ephemeral tunnel\n")
-  fmt.Printf("  -t, --tunnel string         Connect a permanent tunnel by ID (requires -e <local-port>)\n")
+	fmt.Printf("  -e, --ephemeral int         Port to expose via ephemeral tunnel; overrides dynamic routing for -t\n")
+  fmt.Printf("  -t, --tunnel string         Connect a permanent tunnel by ID\n")
   fmt.Printf("  -r, --resume                Resume the last tunnel session (ephemeral or permanent)\n")
   fmt.Printf("      --show-qr               Print a QR code of the tunnel URL (use with -e or -r)\n")
   fmt.Printf("      --tunnel-server string  Tunnel server URL (default %q)\n", defaultServer)
@@ -225,6 +232,7 @@ func main() {
 		uninstall      bool
 		loginMode      bool
 		switchAccounts bool
+		whoami         bool
 		listViews      bool
 		tailViewID     string
 		openViewID     string
@@ -249,6 +257,7 @@ func main() {
 	flag.BoolVar(&showQR, "show-qr", false, "")
 	flag.BoolVar(&loginMode, "login", false, "")
 	flag.BoolVar(&switchAccounts, "switch-accounts", false, "")
+	flag.BoolVar(&whoami, "whoami", false, "")
 	flag.BoolVar(&listViews, "views-list", false, "")
 	flag.StringVar(&tailViewID, "views-tail", "", "")
 	flag.StringVar(&openViewID, "views-open", "", "")
@@ -392,6 +401,15 @@ func main() {
 		os.Exit(0)
 	}
 
+	// Whoami
+	if whoami {
+		apiURL := resolveAPIURL(serverURL)
+		if err := runWhoami(apiURL); err != nil {
+			log.Fatalf("whoami failed: %v", err)
+		}
+		os.Exit(0)
+	}
+
 	// Check for updates (unless disabled or running in development)
 	if !noUpgradeCheck && !isRunningInDevelopment() {
 		checkForUpdates()
@@ -406,9 +424,6 @@ func main() {
 
 	// ── Permanent tunnel ──────────────────────────────────────────────────────
 	if tunnelID != "" {
-		if ephemeralPort == 0 {
-			log.Fatal("Error: --tunnel requires -e <local-port> to specify where to forward traffic")
-		}
 		if resume {
 			log.Fatal("Error: --tunnel and --resume cannot be used together; use --resume alone to reconnect the last session")
 		}
@@ -863,28 +878,46 @@ func connectToTunnelServer(ctx context.Context, serverURL, clientID, localAddr s
 // yamux stream and the local service, logging the method, path, status, and duration.
 // For WebSocket upgrades (101) it falls back to a raw bidirectional copy after
 // forwarding the handshake, preserving any bytes already buffered by the readers.
+//
+// When localAddr has no port (e.g. "localhost"), the target port is derived
+// dynamically from the X-RBite-Port header injected by the tunnel server.
 func handleTunneledConnection(stream net.Conn, localAddr string) {
 	defer stream.Close()
-
-	localConn, err := net.Dial("tcp", localAddr)
-	if err != nil {
-		log.Printf("local dial failed (%s): %v", localAddr, err)
-		return
-	}
-	defer localConn.Close()
 
 	start := time.Now()
 
 	// Keep buffered readers in scope — needed for the WebSocket fallback so that
 	// any bytes read ahead past the HTTP headers are not lost.
 	streamBuf := bufio.NewReader(stream)
-	localBuf := bufio.NewReader(localConn)
 
 	req, err := http.ReadRequest(streamBuf)
 	if err != nil {
 		log.Printf("failed to read request: %v", err)
 		return
 	}
+
+	// Dynamic port mode: localAddr has no port component (e.g. "localhost").
+	// Derive the target port from the X-RBite-Port header injected by the tunnel
+	// server and strip it so it doesn't reach the local service.
+	targetAddr := localAddr
+	if !strings.Contains(localAddr, ":") {
+		port := req.Header.Get("X-RBite-Port")
+		req.Header.Del("X-RBite-Port")
+		if port == "" {
+			log.Printf("dynamic port: no X-RBite-Port header for %s %s", req.Method, req.URL.RequestURI())
+			return
+		}
+		targetAddr = localAddr + ":" + port
+	}
+
+	localConn, err := net.Dial("tcp", targetAddr)
+	if err != nil {
+		log.Printf("local dial failed (%s): %v", targetAddr, err)
+		return
+	}
+	defer localConn.Close()
+
+	localBuf := bufio.NewReader(localConn)
 
 	if err := req.Write(localConn); err != nil {
 		log.Printf("failed to forward request: %v", err)
@@ -1578,6 +1611,93 @@ func runSwitchAccounts(apiURL string) error {
 	}
 }
 
+// runWhoami prints the authenticated user's name, email, and active account.
+func runWhoami(apiURL string) error {
+	cfg, err := loadOrCreateConfig()
+	if err != nil {
+		return err
+	}
+	if cfg.AccessToken == "" && cfg.RefreshToken == "" {
+		fmt.Println("You are not logged in. Run 'rbite --login' to authenticate.")
+		return nil
+	}
+
+	// Silently refresh if we only have a refresh token.
+	if cfg.AccessToken == "" {
+		clientID := getEnv("OAUTH_CLIENT_ID", DefaultOAuthClientID)
+		newAccess, newRefresh, refreshErr := refreshAccessToken(apiURL, cfg.RefreshToken, clientID)
+		if refreshErr != nil {
+			fmt.Println("Your session has expired. Run 'rbite --login' to re-authenticate.")
+			return nil
+		}
+		cfg.AccessToken = newAccess
+		if newRefresh != "" {
+			cfg.RefreshToken = newRefresh
+		}
+		_ = saveConfig(cfg)
+	}
+
+	// Fetch user info.
+	profileResp, err := authedGet(apiURL, "/oauth2/userinfo", cfg.AccessToken, cfg)
+	if err != nil {
+		if errors.Is(err, errSessionExpired) {
+			fmt.Println("Your session has expired. Run 'rbite --login' to re-authenticate.")
+			return nil
+		}
+		return fmt.Errorf("userinfo request failed: %w", err)
+	}
+	defer profileResp.Body.Close()
+
+	if profileResp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(profileResp.Body)
+		return fmt.Errorf("userinfo endpoint returned status %d: %s", profileResp.StatusCode, string(body))
+	}
+
+	var profile struct {
+		Email      string `json:"email"`
+		GivenName  string `json:"given_name"`
+		FamilyName string `json:"family_name"`
+	}
+	if err := json.NewDecoder(profileResp.Body).Decode(&profile); err != nil {
+		return fmt.Errorf("could not parse userinfo response: %w", err)
+	}
+
+	// Fetch account name if an account is selected.
+	var accountName string
+	if cfg.AccountID != "" {
+		acctResp, acctErr := authedGet(apiURL, "/v1/accounts/"+cfg.AccountID, cfg.AccessToken, cfg)
+		if acctErr == nil {
+			defer acctResp.Body.Close()
+			if acctResp.StatusCode == http.StatusOK {
+				var acctPayload struct {
+					Account struct {
+						Name string `json:"name"`
+					} `json:"account"`
+				}
+				if jsonErr := json.NewDecoder(acctResp.Body).Decode(&acctPayload); jsonErr == nil {
+					accountName = acctPayload.Account.Name
+				}
+			}
+		}
+	}
+
+	fmt.Println("You're logged in as:")
+	fmt.Println()
+	name := strings.TrimSpace(profile.GivenName + " " + profile.FamilyName)
+	if name != "" {
+		fmt.Printf("- Name:    %s\n", name)
+	}
+	fmt.Printf("- Email:   %s\n", profile.Email)
+	if cfg.AccountID != "" {
+		if accountName != "" {
+			fmt.Printf("- Account: %s (%s)\n", accountName, cfg.AccountID)
+		} else {
+			fmt.Printf("- Account: %s\n", cfg.AccountID)
+		}
+	}
+	return nil
+}
+
 // runListViews lists active inspector views for the current account and shows details for a chosen one.
 // activeView holds the fields we care about for an active inspector view.
 type activeView struct {
@@ -2207,7 +2327,11 @@ func runPermanentTunnel(serverURL, apiURL, tID string, localPort int, showQR boo
 	if len(details.Ports) > 0 {
 		fmt.Printf("> Allowed ports:     %v\n", details.Ports)
 	}
-	fmt.Printf("> Local service:    http://localhost:%d\n", localPort)
+	if localPort != 0 {
+		fmt.Printf("> Local service:    http://localhost:%d\n", localPort)
+	} else {
+		fmt.Printf("> Local service:    http://localhost:{port} — dynamic, matches public request port\n")
+	}
 	fmt.Printf("Press Ctrl+C to stop\n\n")
 	if showQR {
 		printQR(details.PublicURL)
@@ -2229,7 +2353,12 @@ func runPermanentTunnel(serverURL, apiURL, tID string, localPort int, showQR boo
 		cancel()
 	}()
 
-	localAddr := fmt.Sprintf("localhost:%d", localPort)
+	var localAddr string
+	if localPort != 0 {
+		localAddr = fmt.Sprintf("localhost:%d", localPort)
+	} else {
+		localAddr = "localhost" // dynamic: port derived per-request from X-RBite-Port header
+	}
 	connectPermanentToTunnelServer(ctx, serverURL, tID, details.Token, localAddr)
 }
 
