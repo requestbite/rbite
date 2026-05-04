@@ -205,7 +205,8 @@ func printHelp() {
 	fmt.Println("\nTunnel Mgmt\n===========")
 	fmt.Printf("  -f, --files string          Share a local directory via ephemeral tunnel (built-in file browser)\n")
 	fmt.Printf("  -e, --ephemeral int         Port to expose via ephemeral tunnel; overrides dynamic routing for -t\n")
-  fmt.Printf("  -t, --tunnel string         Connect a permanent tunnel by ID\n")
+  fmt.Printf("  -t, --tunnels string        Connect a permanent tunnel by name\n")
+  fmt.Printf("      --tunnels-list          List tunnels for the current account\n")
   fmt.Printf("  -r, --resume                Resume the last tunnel session (ephemeral or permanent)\n")
   fmt.Printf("      --show-qr               Print a QR code of the tunnel URL (use with -e or -r)\n")
   fmt.Printf("      --tunnel-server string  Tunnel server URL (default %q)\n", defaultServer)
@@ -430,13 +431,14 @@ func main() {
 		addViewName    string
 		showQR         bool
 		filesPath      string
+		listTunnels    bool
 	)
 	defaultServer := buildDefaultServerURL()
 
 	flag.IntVar(&ephemeralPort, "e", 0, "")
 	flag.IntVar(&ephemeralPort, "ephemeral", 0, "")
 	flag.StringVar(&tunnelID, "t", "", "")
-	flag.StringVar(&tunnelID, "tunnel", "", "")
+	flag.StringVar(&tunnelID, "tunnels", "", "")
 	flag.BoolVar(&showVersion, "v", false, "")
 	flag.BoolVar(&showVersion, "version", false, "")
 	flag.BoolVar(&showHelp, "h", false, "")
@@ -453,6 +455,7 @@ func main() {
 	flag.BoolVar(&switchAccounts, "switch-accounts", false, "")
 	flag.BoolVar(&whoami, "whoami", false, "")
 	flag.BoolVar(&listViews, "views-list", false, "")
+	flag.BoolVar(&listTunnels, "tunnels-list", false, "")
 	flag.StringVar(&tailViewID, "views-tail", "", "")
 	flag.StringVar(&openViewID, "views-open", "", "")
 	flag.StringVar(&addViewName, "views-add", "", "")
@@ -582,6 +585,15 @@ func main() {
 		apiURL := resolveAPIURL(serverURL)
 		if err := runWithAutoRelogin(apiURL, func() error { return runListViews(apiURL) }); err != nil {
 			log.Fatalf("List views failed: %v", err)
+		}
+		os.Exit(0)
+	}
+
+	// List tunnels
+	if listTunnels {
+		apiURL := resolveAPIURL(serverURL)
+		if err := runWithAutoRelogin(apiURL, func() error { return runListTunnels(apiURL) }); err != nil {
+			log.Fatalf("List tunnels failed: %v", err)
 		}
 		os.Exit(0)
 	}
@@ -2475,6 +2487,95 @@ func streamSSE(ctx context.Context, apiURL, path string, cfg *Config) error {
 	return nil
 }
 
+// ── Tunnel list ───────────────────────────────────────────────────────────────
+
+type tunnelListItem struct {
+	ID          string    `json:"id"`
+	Name        string    `json:"name"`
+	Description string    `json:"description"`
+	Enabled     bool      `json:"enabled"`
+	Active      bool      `json:"active"`
+	Ports       []int     `json:"ports"`
+	DefaultPort int       `json:"defaultPort"`
+	PublicURL   string    `json:"publicUrl"`
+	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt"`
+}
+
+func runListTunnels(apiURL string) error {
+	cfg, err := ensureAuthenticated(apiURL)
+	if err != nil {
+		return err
+	}
+	if cfg.AccountID == "" {
+		return errors.New("no account selected; run rbite --switch-accounts first")
+	}
+
+	resp, err := authedGet(apiURL, "/v1/accounts/"+cfg.AccountID+"/tunnels", cfg.AccessToken, cfg)
+	if err != nil {
+		return fmt.Errorf("tunnels request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("tunnels endpoint returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var tunnels []tunnelListItem
+	if err := json.NewDecoder(resp.Body).Decode(&tunnels); err != nil {
+		return fmt.Errorf("could not parse tunnels response: %w", err)
+	}
+
+	if len(tunnels) == 0 {
+		fmt.Println("No tunnels found for this account.")
+		return nil
+	}
+
+	for i, t := range tunnels {
+		fmt.Printf("  %d. %s\n", i+1, t.Name)
+	}
+	fmt.Println()
+
+	reader := bufio.NewReader(os.Stdin)
+	var choice int
+	for {
+		fmt.Printf("Get details about tunnel (1-%d): ", len(tunnels))
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			return fmt.Errorf("could not read input: %w", err)
+		}
+		if _, err := fmt.Sscanf(strings.TrimSpace(line), "%d", &choice); err != nil || choice < 1 || choice > len(tunnels) {
+			fmt.Printf("Please enter a number between 1 and %d.\n", len(tunnels))
+			continue
+		}
+		break
+	}
+
+	t := tunnels[choice-1]
+	fmt.Println()
+
+	var portsStr string
+	if len(t.Ports) == 0 {
+		portsStr = "All"
+	} else {
+		parts := make([]string, len(t.Ports))
+		for i, p := range t.Ports {
+			parts[i] = fmt.Sprintf("%d", p)
+		}
+		portsStr = strings.Join(parts, ", ")
+	}
+
+	fmt.Printf("Name:          %s\n", t.Name)
+	fmt.Printf("Default port:  %d\n", t.DefaultPort)
+	fmt.Printf("Allowed ports: %s\n", portsStr)
+	fmt.Printf("Enabled:       %v\n", t.Enabled)
+	fmt.Printf("Public URL:    %s\n", t.PublicURL)
+	fmt.Println()
+	fmt.Printf("To connect this tunnel, run \"rbite -t %s\"\n", t.Name)
+	return nil
+}
+
 // ── Permanent tunnel support ──────────────────────────────────────────────────
 
 // tunnelDetails holds the fields returned by the API for a permanent tunnel.
@@ -2513,6 +2614,34 @@ func fetchTunnelDetails(apiURL, accountID, tID string, cfg *Config) (*tunnelDeta
 	return &t, nil
 }
 
+// resolveTunnelID resolves a tunnel name (or existing UUID) to a tunnel ID by
+// fetching the account's tunnel list. Matching by ID is kept so that --resume,
+// which stores the resolved ID in config, continues to work transparently.
+func resolveTunnelID(apiURL, accountID, nameOrID string, cfg *Config) (string, error) {
+	resp, err := authedGet(apiURL, "/v1/accounts/"+accountID+"/tunnels", cfg.AccessToken, cfg)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch tunnels: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("tunnels endpoint returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var tunnels []tunnelListItem
+	if err := json.NewDecoder(resp.Body).Decode(&tunnels); err != nil {
+		return "", fmt.Errorf("could not parse tunnels response: %w", err)
+	}
+
+	for _, t := range tunnels {
+		if t.Name == nameOrID || t.ID == nameOrID {
+			return t.ID, nil
+		}
+	}
+	return "", fmt.Errorf("no tunnel found with name %q", nameOrID)
+}
+
 // runPermanentTunnel orchestrates fetching tunnel details, printing status, and
 // connecting to the tunnel server.  It saves resume state to config before
 // connecting so that --resume works even if the process is interrupted.
@@ -2521,7 +2650,12 @@ func runPermanentTunnel(serverURL, apiURL, tID string, localPort int, showQR boo
 		log.Fatal("No account selected — run: rbite --switch-accounts")
 	}
 
-	details, err := fetchTunnelDetails(apiURL, cfg.AccountID, tID, cfg)
+	resolvedID, err := resolveTunnelID(apiURL, cfg.AccountID, tID, cfg)
+	if err != nil {
+		log.Fatalf("Could not resolve tunnel: %v", err)
+	}
+
+	details, err := fetchTunnelDetails(apiURL, cfg.AccountID, resolvedID, cfg)
 	if err != nil {
 		log.Fatalf("Could not fetch tunnel details: %v", err)
 	}
@@ -2547,7 +2681,7 @@ func runPermanentTunnel(serverURL, apiURL, tID string, localPort int, showQR boo
 
 	// Persist resume state before blocking so Ctrl+C restarts cleanly.
 	cfg.LastSessionType = "permanent"
-	cfg.LastTunnelID = tID
+	cfg.LastTunnelID = resolvedID
 	cfg.LastLocalPort = localPort
 	_ = saveConfig(cfg)
 
@@ -2567,7 +2701,7 @@ func runPermanentTunnel(serverURL, apiURL, tID string, localPort int, showQR boo
 	} else {
 		localAddr = "localhost" // dynamic: port derived per-request from X-RBite-Port header
 	}
-	connectPermanentToTunnelServer(ctx, serverURL, tID, details.Token, localAddr)
+	connectPermanentToTunnelServer(ctx, serverURL, resolvedID, details.Token, localAddr)
 }
 
 // connectPermanentToTunnelServer opens a yamux-over-WebSocket connection to the
