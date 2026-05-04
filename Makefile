@@ -54,7 +54,7 @@ COLOR_GREEN := \033[32m
 COLOR_BLUE := \033[34m
 COLOR_YELLOW := \033[33m
 
-.PHONY: all build build-all release clean install dev build-web help
+.PHONY: all build build-all release clean install dev dev-web build-web help
 
 # Default target
 all: build
@@ -164,6 +164,15 @@ install: build
 		echo "$(COLOR_YELLOW)Warning:$(COLOR_RESET) ~/.local/bin is not in your PATH"; \
 		echo "Add to PATH: export PATH=\"$$HOME/.local/bin:$$PATH\";"; \
 	fi
+
+# Run with hot reload for both Go and web frontend (requires air + Node.js)
+# Usage: make dev-web ARGS="-f ."
+dev-web:
+	@if ! command -v air >/dev/null; then \
+		echo "Air is not installed. Install it with: go install github.com/air-verse/air@latest"; \
+		exit 1; \
+	fi
+	@node web/watch.js & air -- $(ARGS); kill %1 2>/dev/null; wait
 
 # Run with hot reload (requires air)
 # Usage: make dev ARGS="-e 3000"

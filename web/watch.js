@@ -2,17 +2,7 @@ const esbuild = require("esbuild");
 const path = require("path");
 const fs = require("fs");
 
-const result = esbuild.buildSync({
-  entryPoints: [path.join(__dirname, "src/index.jsx")],
-  bundle: true,
-  minify: true,
-  jsxFactory: "h",
-  jsxFragment: "Fragment",
-  format: "iife",
-  write: false,
-});
-
-const js = result.outputFiles[0].text;
+const outPath = path.join(__dirname, "../cmd/rbite/web/index.html");
 
 const css = `
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -50,7 +40,8 @@ td{padding:10px 14px}
 }
 `;
 
-const html = `<!DOCTYPE html>
+function writeHtml(js) {
+  const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -66,8 +57,32 @@ const html = `<!DOCTYPE html>
 <script>${js}</script>
 </body>
 </html>`;
+  fs.mkdirSync(path.dirname(outPath), { recursive: true });
+  fs.writeFileSync(outPath, html, "utf8");
+  console.log("[web] rebuilt " + outPath + " (" + Buffer.byteLength(html) + " bytes)");
+}
 
-const outPath = path.join(__dirname, "../cmd/rbite/web/index.html");
-fs.mkdirSync(path.dirname(outPath), { recursive: true });
-fs.writeFileSync(outPath, html, "utf8");
-console.log("Built: " + outPath + " (" + Buffer.byteLength(html) + " bytes)");
+(async () => {
+  const ctx = await esbuild.context({
+    entryPoints: [path.join(__dirname, "src/index.jsx")],
+    bundle: true,
+    minify: false,
+    jsxFactory: "h",
+    jsxFragment: "Fragment",
+    format: "iife",
+    write: false,
+    plugins: [{
+      name: "html-assembler",
+      setup(build) {
+        build.onEnd(result => {
+          if (result.errors.length === 0) {
+            writeHtml(result.outputFiles[0].text);
+          }
+        });
+      },
+    }],
+  });
+
+  await ctx.watch();
+  console.log("[web] watching web/src/ for changes...");
+})();

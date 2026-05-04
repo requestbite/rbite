@@ -51,64 +51,66 @@ export default function App() {
   }
 
   return (
-    <div class="container">
-      <header>
-        <h1>
-          <span class="logo">⚡</span> rbite file share
-        </h1>
-        <nav class="breadcrumb">
-          {breadcrumbs().map((crumb, i, arr) => (
-            <span key={crumb.path}>
-              {i > 0 && <span class="sep">/</span>}
-              {i < arr.length - 1 ? (
-                <a href="#" onClick={(e) => { e.preventDefault(); setPath(crumb.path); }}>
-                  {crumb.label}
-                </a>
-              ) : (
-                <span class="current">{crumb.label}</span>
-              )}
-            </span>
-          ))}
-        </nav>
-      </header>
+    <div class="page">
+      <p class="site-title">RequestBite Tunnel</p>
+      <div class="browser-card">
+        <header>
+          <nav class="breadcrumb">
+            {breadcrumbs().map((crumb, i, arr) => (
+              <span key={crumb.path}>
+                {i > 0 && <span class="sep">/</span>}
+                {i < arr.length - 1 ? (
+                  <a href="#" onClick={(e) => { e.preventDefault(); setPath(crumb.path); }}>
+                    {crumb.label}
+                  </a>
+                ) : (
+                  <span class="current">{crumb.label}</span>
+                )}
+              </span>
+            ))}
+          </nav>
+        </header>
 
-      <main>
-        {error && <div class="error">{error}</div>}
-        {loading && <div class="loading">Loading…</div>}
-        {!loading && !error && entries.length === 0 && (
-          <div class="empty">Empty directory</div>
-        )}
-        {!loading && !error && entries.length > 0 && (
-          <table>
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Size</th>
-                <th>Modified</th>
-              </tr>
-            </thead>
-            <tbody>
-              {entries.map((e) => (
-                <tr key={e.name}>
-                  <td class="name-cell">
-                    {e.isDir ? (
-                      <a href="#" class="dir" onClick={(ev) => { ev.preventDefault(); navigate(e.name); }}>
-                        📁 {e.name}
-                      </a>
-                    ) : (
-                      <a href={"/api/download?path=" + encodeURIComponent(path ? path + "/" + e.name : e.name)} class="file">
-                        📄 {e.name}
-                      </a>
-                    )}
-                  </td>
-                  <td class="size-cell">{e.isDir ? "—" : formatSize(e.size)}</td>
-                  <td class="date-cell">{formatDate(e.modTime)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </main>
+        <main>
+          {error && <div class="error">{error}</div>}
+          {loading && <div class="loading">Loading…</div>}
+          {!loading && !error && entries.length === 0 && (
+            <div class="empty">Empty directory</div>
+          )}
+          {!loading && !error && entries.length > 0 && (
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Name</th>
+                    <th class="col-size">Size</th>
+                    <th class="col-date">Modified</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {entries.map((e) => (
+                    <tr key={e.name}>
+                      <td class="name-cell">
+                        {e.isDir ? (
+                          <a href="#" class="dir" onClick={(ev) => { ev.preventDefault(); navigate(e.name); }}>
+                            📁 {e.name}
+                          </a>
+                        ) : (
+                          <a href={"/api/download?path=" + encodeURIComponent(path ? path + "/" + e.name : e.name)} class="file">
+                            📄 {e.name}
+                          </a>
+                        )}
+                      </td>
+                      <td class="size-cell col-size">{e.isDir ? "—" : formatSize(e.size)}</td>
+                      <td class="date-cell col-date">{formatDate(e.modTime)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </main>
+      </div>
     </div>
   );
 }
