@@ -3,7 +3,8 @@ module.exports = `
 body{background:#f9fafb;color:#111827;font-family:'Inter',-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:14px;line-height:1.6;min-height:100vh;padding:32px 16px}
 a{text-decoration:none}
 .page{max-width:880px;margin:0 auto}
-.site-title{font-family:'JetBrains Mono',monospace;font-size:11px;color:#9ca3af;margin-bottom:16px;letter-spacing:0.04em}
+.page-header{display:flex;flex-direction:column;align-items:center;margin-bottom:20px;gap:10px}
+.site-title{font-family:'JetBrains Mono',monospace;font-size:14px;color:#9ca3af;letter-spacing:0.04em;text-align:center}
 .browser-card{background:#ffffff;border-radius:8px;overflow:hidden;outline:1px solid #d1d5db;outline-offset:-1px}
 header{background:#ffffff;padding:10px 16px;border-bottom:1px solid #e5e7eb}
 .breadcrumb{display:flex;flex-wrap:wrap;gap:4px;align-items:center;font-size:13px;color:#6b7280}
@@ -24,11 +25,13 @@ header{background:#ffffff;padding:10px 16px;border-bottom:1px solid #e5e7eb}
 .download-btn:hover{background:#dbeafe}
 .file-row.selected .download-btn{background:rgba(255,255,255,0.25);color:#fff}
 .file-row.selected .download-btn:hover{background:rgba(255,255,255,0.4)}
+.footer-hint{font-family:'JetBrains Mono',monospace;font-size:11px;color:#9ca3af;text-align:center;letter-spacing:0.04em;margin-top:16px;line-height:1.8}
+.footer-hint a{color:#0ea5e9}
+.footer-hint a:hover{text-decoration:underline}
 .error{background:#fef2f2;border:1px solid #fecaca;color:#dc2626;padding:12px 16px;margin:12px;border-radius:6px}
 .loading,.empty{color:#9ca3af;padding:40px 16px;text-align:center}
 @media(max-width:600px){
 body{padding:16px 12px}
-.site-title{font-size:10px}
 .file-row{padding:4px 10px}
 }
 `;

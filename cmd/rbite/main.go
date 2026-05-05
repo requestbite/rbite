@@ -322,7 +322,7 @@ func startFileHTTPServer(rootPath string) (net.Listener, error) {
 	mux.HandleFunc("/api/download", fileDownloadHandler(rootPath))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprint(w, fileServerHTML)
+		fmt.Fprint(w, strings.Replace(fileServerHTML, "{{VERSION}}", Version, 1))
 	})
 	srv := &http.Server{Handler: mux}
 	go srv.Serve(ln) //nolint:errcheck
