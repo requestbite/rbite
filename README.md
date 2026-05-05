@@ -4,12 +4,19 @@
 
 ## About
 
-This repository hosts the RequestBite RBite CLI which is the CLI app for
-the [RequestBite][rb] service. It's currently in active development and at the
-moment it can be used to set up ephemeral RequestBite Tunnel tunnels that can be
-used to expose services running on `localhost` to the public Internet - perfect
-for when you need to demo something you're building or when you need to reach
-a locally running service from across the Internet.
+This repository hosts the RequestBite RBite CLI which is the CLI app for the
+[RequestBite][rb] service. It's currently in active development but can already
+be used to set up ephemeral RequestBite Tunnel tunnels that can be used to
+expose services running on `localhost` to the public Internet - perfect for when
+you need to demo something you're building or when you need to reach a locally
+running service from across the Internet. It can also establish persistent
+tunnels (requires a paid plan).
+
+Not only that, it includes a built-in file browser so you can share local files
+(and receive files by others if enabled). It can also be used to manage so
+called RequestBite Views and stream incoming webhooks in real-time.
+
+Read more at <https://docs.requestbite.com/rbite/>.
 
 [rb]: https://requestbite.com
 
