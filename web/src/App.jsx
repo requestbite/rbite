@@ -34,7 +34,7 @@ function HardDriveDownloadIcon() {
 }
 
 export default function App() {
-  const [path, setPath] = useState("");
+  const [path, setPath] = useState(decodeURIComponent(window.location.hash.replace(/^#\/?/, "")));
   const [entries, setEntries] = useState([]);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -43,9 +43,19 @@ export default function App() {
   const lastClickRef = useRef(null);
 
   useEffect(() => {
+    const hash = "#/" + path;
+    if (window.location.hash !== hash) history.pushState(null, "", hash);
     load(path);
     setSelectedName(null);
   }, [path]);
+
+  useEffect(() => {
+    function onPop() {
+      setPath(decodeURIComponent(window.location.hash.replace(/^#\/?/, "")));
+    }
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
 
   async function load(p) {
     setLoading(true);
