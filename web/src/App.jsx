@@ -1,5 +1,5 @@
 import { h } from "preact";
-import { useState, useEffect } from "preact/hooks";
+import { useState, useEffect, useRef } from "preact/hooks";
 
 function formatSize(bytes) {
   if (bytes < 1024) return bytes + " B";
@@ -8,9 +8,16 @@ function formatSize(bytes) {
   return (bytes / (1024 * 1024 * 1024)).toFixed(1) + " GB";
 }
 
-function formatDate(iso) {
-  const d = new Date(iso);
-  return d.toLocaleDateString() + " " + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+function HardDriveDownloadIcon() {
+  return (
+    <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 2v8"/>
+      <path d="m16 6-4 4-4-4"/>
+      <rect width="20" height="8" x="2" y="14" rx="2"/>
+      <path d="M6 18h.01"/>
+      <path d="M10 18h.01"/>
+    </svg>
+  );
 }
 
 export default function App() {
@@ -18,9 +25,13 @@ export default function App() {
   const [entries, setEntries] = useState([]);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [selectedName, setSelectedName] = useState(null);
+  const clickTimerRef = useRef(null);
+  const lastClickRef = useRef(null);
 
   useEffect(() => {
     load(path);
+    setSelectedName(null);
   }, [path]);
 
   async function load(p) {
@@ -42,6 +53,28 @@ export default function App() {
     setPath(path ? path + "/" + name : name);
   }
 
+  function handleRowClick(entry) {
+    if (clickTimerRef.current && lastClickRef.current === entry.name) {
+      clearTimeout(clickTimerRef.current);
+      clickTimerRef.current = null;
+      lastClickRef.current = null;
+      if (entry.isDir) navigate(entry.name);
+    } else {
+      if (clickTimerRef.current) clearTimeout(clickTimerRef.current);
+      setSelectedName(entry.name);
+      lastClickRef.current = entry.name;
+      clickTimerRef.current = setTimeout(() => {
+        clickTimerRef.current = null;
+        lastClickRef.current = null;
+      }, 250);
+    }
+  }
+
+  function navigateBreadcrumb(p) {
+    setSelectedName(null);
+    setPath(p);
+  }
+
   function breadcrumbs() {
     const parts = path ? path.split("/") : [];
     return [
@@ -60,7 +93,7 @@ export default function App() {
               <span key={crumb.path}>
                 {i > 0 && <span class="sep">/</span>}
                 {i < arr.length - 1 ? (
-                  <a href="#" onClick={(e) => { e.preventDefault(); setPath(crumb.path); }}>
+                  <a href="#" onClick={(e) => { e.preventDefault(); navigateBreadcrumb(crumb.path); }}>
                     {crumb.label}
                   </a>
                 ) : (
@@ -78,35 +111,32 @@ export default function App() {
             <div class="empty">Empty directory</div>
           )}
           {!loading && !error && entries.length > 0 && (
-            <div class="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Name</th>
-                    <th class="col-size">Size</th>
-                    <th class="col-date">Modified</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {entries.map((e) => (
-                    <tr key={e.name}>
-                      <td class="name-cell">
-                        {e.isDir ? (
-                          <a href="#" class="dir" onClick={(ev) => { ev.preventDefault(); navigate(e.name); }}>
-                            📁 {e.name}
-                          </a>
-                        ) : (
-                          <a href={"/api/download?path=" + encodeURIComponent(path ? path + "/" + e.name : e.name)} class="file">
-                            📄 {e.name}
-                          </a>
-                        )}
-                      </td>
-                      <td class="size-cell col-size">{e.isDir ? "—" : formatSize(e.size)}</td>
-                      <td class="date-cell col-date">{formatDate(e.modTime)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            <div class="file-list">
+              {entries.map((e) => (
+                <div
+                  key={e.name}
+                  class={`file-row${selectedName === e.name ? " selected" : ""}`}
+                  onClick={() => handleRowClick(e)}
+                >
+                  <span class="row-icon">{e.isDir ? "📁" : "📄"}</span>
+                  <span class="row-name">
+                    {e.name}
+                    {!e.isDir && (
+                      <span class="row-size">{formatSize(e.size)}</span>
+                    )}
+                  </span>
+                  {!e.isDir && (
+                    <a
+                      class="download-btn"
+                      href={"/api/download?path=" + encodeURIComponent(path ? path + "/" + e.name : e.name)}
+                      title="Download"
+                      onClick={(ev) => ev.stopPropagation()}
+                    >
+                      <HardDriveDownloadIcon />
+                    </a>
+                  )}
+                </div>
+              ))}
             </div>
           )}
         </main>
