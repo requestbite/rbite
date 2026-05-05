@@ -2,3 +2,4 @@ build/
 /rbite
 .env
 web/node_modules/
+tmp/

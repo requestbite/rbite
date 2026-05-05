@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"errors"
+	"sync"
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
@@ -203,7 +204,8 @@ func printHelp() {
   fmt.Printf("      --views-tail [view ID]  Stream live requests for a view (prompts if no ID given)\n")
   fmt.Printf("      --views-open [view ID]  Open a view's capture URL in the browser (prompts if no ID given)\n")
 	fmt.Println("\nTunnel Mgmt\n===========")
-	fmt.Printf("  -f, --files string          Share a local directory via ephemeral tunnel (built-in file browser)\n")
+	fmt.Printf("  -f, --files string          Share a local directory via ephemeral tunnel (built-in file browser, read-only)\n")
+	fmt.Printf(" -fw, --files-write string   Share a local directory via ephemeral tunnel with upload support (read/write)\n")
 	fmt.Printf("  -e, --ephemeral int         Port to expose via ephemeral tunnel; overrides dynamic routing for -t\n")
   fmt.Printf("  -t, --tunnels string        Connect a permanent tunnel by name\n")
   fmt.Printf("      --tunnels-list          List tunnels for the current account\n")
@@ -284,6 +286,69 @@ func fileListHandler(rootPath string) http.HandlerFunc {
 	}
 }
 
+func fileUploadHandler(rootPath string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		rel := r.URL.Query().Get("path")
+		abs, err := safePath(rootPath, rel)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		info, err := os.Stat(abs)
+		if os.IsNotExist(err) {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		if err != nil || !info.IsDir() {
+			http.Error(w, "not a directory", http.StatusBadRequest)
+			return
+		}
+		if err := r.ParseMultipartForm(32 << 20); err != nil {
+			http.Error(w, "could not parse form: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		fileHeaders := r.MultipartForm.File["file"]
+		if len(fileHeaders) == 0 {
+			http.Error(w, "no file provided", http.StatusBadRequest)
+			return
+		}
+		saved := make([]string, 0, len(fileHeaders))
+		for _, fh := range fileHeaders {
+			name := filepath.Base(fh.Filename)
+			if name == "." || name == ".." || name == "/" {
+				http.Error(w, "invalid filename", http.StatusBadRequest)
+				return
+			}
+			dst, err := safePath(abs, name)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			src, err := fh.Open()
+			if err != nil {
+				http.Error(w, "could not open uploaded file", http.StatusInternalServerError)
+				return
+			}
+			out, err := os.Create(dst)
+			if err != nil {
+				src.Close()
+				http.Error(w, "could not create file", http.StatusInternalServerError)
+				return
+			}
+			_, cpErr := io.Copy(out, src)
+			src.Close()
+			out.Close()
+			if cpErr != nil {
+				http.Error(w, "could not write file", http.StatusInternalServerError)
+				return
+			}
+			saved = append(saved, name)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"saved": saved})
+	}
+}
+
 func fileDownloadHandler(rootPath string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		rel := r.URL.Query().Get("path")
@@ -312,7 +377,7 @@ func fileDownloadHandler(rootPath string) http.HandlerFunc {
 	}
 }
 
-func startFileHTTPServer(rootPath string) (net.Listener, error) {
+func startFileHTTPServer(rootPath string, writable bool) (net.Listener, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
@@ -320,16 +385,25 @@ func startFileHTTPServer(rootPath string) (net.Listener, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/ls", fileListHandler(rootPath))
 	mux.HandleFunc("/api/download", fileDownloadHandler(rootPath))
+	if writable {
+		mux.HandleFunc("/api/upload", fileUploadHandler(rootPath))
+	}
+	writableStr := "false"
+	if writable {
+		writableStr = "true"
+	}
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprint(w, strings.Replace(fileServerHTML, "{{VERSION}}", Version, 1))
+		html := strings.Replace(fileServerHTML, "{{VERSION}}", Version, 1)
+		html = strings.Replace(html, "{{WRITABLE}}", writableStr, 1)
+		fmt.Fprint(w, html)
 	})
 	srv := &http.Server{Handler: mux}
 	go srv.Serve(ln) //nolint:errcheck
 	return ln, nil
 }
 
-func runFileServer(rootPath string, showQR bool, serverURL string) error {
+func runFileServer(rootPath string, showQR bool, serverURL string, writable bool) error {
 	absRoot, err := filepath.Abs(rootPath)
 	if err != nil {
 		return fmt.Errorf("invalid path: %w", err)
@@ -350,7 +424,7 @@ func runFileServer(rootPath string, showQR bool, serverURL string) error {
 		return err
 	}
 
-	ln, err := startFileHTTPServer(absRoot)
+	ln, err := startFileHTTPServer(absRoot, writable)
 	if err != nil {
 		return fmt.Errorf("could not start file server: %w", err)
 	}
@@ -375,6 +449,9 @@ func runFileServer(rootPath string, showQR bool, serverURL string) error {
 
 	fmt.Printf("\n%s\n", tunnelArt)
 	fmt.Printf("Sharing directory: %s\n", absRoot)
+	if writable {
+		fmt.Printf("Mode: read/write (uploads enabled)\n")
+	}
 	fmt.Printf("Ephemeral tunnel created. Expires at %s (in %d minutes).\n", expiresAt.Local().Format("15:04:05"), expiresIn)
 	fmt.Printf("> File browser: https://%s\n", tunnelURL)
 	fmt.Printf("Press Ctrl+C to stop\n\n")
@@ -429,9 +506,10 @@ func main() {
 		tailViewID     string
 		openViewID     string
 		addViewName    string
-		showQR         bool
-		filesPath      string
-		listTunnels    bool
+		showQR          bool
+		filesPath       string
+		filesWritePath  string
+		listTunnels     bool
 	)
 	defaultServer := buildDefaultServerURL()
 
@@ -451,6 +529,8 @@ func main() {
 	flag.BoolVar(&showQR, "show-qr", false, "")
 	flag.StringVar(&filesPath, "f", "", "")
 	flag.StringVar(&filesPath, "files", "", "")
+	flag.StringVar(&filesWritePath, "fw", "", "")
+	flag.StringVar(&filesWritePath, "files-write", "", "")
 	flag.BoolVar(&loginMode, "login", false, "")
 	flag.BoolVar(&switchAccounts, "switch-accounts", false, "")
 	flag.BoolVar(&whoami, "whoami", false, "")
@@ -616,7 +696,7 @@ func main() {
 		os.Exit(0)
 	}
 
-	// File share
+	// File share (read-only)
 	if filesPath != "" {
 		if ephemeralPort != 0 || resume {
 			log.Fatal("Error: -f/--files cannot be used together with -e/--ephemeral or --resume")
@@ -624,7 +704,21 @@ func main() {
 		if !noUpgradeCheck && !isRunningInDevelopment() {
 			checkForUpdates()
 		}
-		if err := runFileServer(filesPath, showQR, serverURL); err != nil {
+		if err := runFileServer(filesPath, showQR, serverURL, false); err != nil {
+			log.Fatalf("File server failed: %v", err)
+		}
+		os.Exit(0)
+	}
+
+	// File share (read/write — uploads enabled)
+	if filesWritePath != "" {
+		if ephemeralPort != 0 || resume {
+			log.Fatal("Error: -fw/--files-write cannot be used together with -e/--ephemeral or --resume")
+		}
+		if !noUpgradeCheck && !isRunningInDevelopment() {
+			checkForUpdates()
+		}
+		if err := runFileServer(filesWritePath, showQR, serverURL, true); err != nil {
 			log.Fatalf("File server failed: %v", err)
 		}
 		os.Exit(0)
@@ -1053,12 +1147,31 @@ func connectToTunnelServer(ctx context.Context, serverURL, clientID, localAddr s
 	}
 	defer ws.Close()
 
+	conn := newWSConn(ws)
+
 	// The tunnel client accepts streams opened by the server → yamux.Server role.
-	session, err := yamux.Server(newWSConn(ws), nil)
+	session, err := yamux.Server(conn, nil)
 	if err != nil {
 		log.Fatalf("yamux session failed: %v", err)
 	}
 	defer session.Close()
+
+	// Keep the WebSocket alive so proxies don't kill idle connections.
+	// Uses conn.ping() so the mutex serialises with yamux data writes.
+	go func() {
+		t := time.NewTicker(20 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if err := conn.ping(); err != nil {
+					return
+				}
+			}
+		}
+	}()
 
 	log.Printf("Connected to tunnel server, waiting for connections...")
 
@@ -1198,10 +1311,17 @@ func printSessionStats(serverURL, clientID string) {
 type wsConn struct {
 	ws     *websocket.Conn
 	reader io.Reader
+	mu     sync.Mutex // serialises all WebSocket writes
 }
 
 func newWSConn(ws *websocket.Conn) *wsConn {
 	return &wsConn{ws: ws}
+}
+
+func (c *wsConn) ping() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.ws.WriteMessage(websocket.PingMessage, nil)
 }
 
 func (c *wsConn) Read(b []byte) (int, error) {
@@ -1229,6 +1349,8 @@ func (c *wsConn) Read(b []byte) (int, error) {
 }
 
 func (c *wsConn) Write(b []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	err := c.ws.WriteMessage(websocket.BinaryMessage, b)
 	if err != nil {
 		return 0, err
@@ -2725,11 +2847,30 @@ func connectPermanentToTunnelServer(ctx context.Context, serverURL, tID, token, 
 	}
 	defer ws.Close()
 
-	session, err := yamux.Server(newWSConn(ws), nil)
+	conn := newWSConn(ws)
+
+	session, err := yamux.Server(conn, nil)
 	if err != nil {
 		log.Fatalf("yamux session failed: %v", err)
 	}
 	defer session.Close()
+
+	// Keep the WebSocket alive so proxies don't kill idle connections.
+	// Uses conn.ping() so the mutex serialises with yamux data writes.
+	go func() {
+		t := time.NewTicker(20 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if err := conn.ping(); err != nil {
+					return
+				}
+			}
+		}
+	}()
 
 	log.Printf("Connected to tunnel server, waiting for connections...")
 

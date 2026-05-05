@@ -38,6 +38,7 @@ const html = `<!DOCTYPE html>
 </head>
 <body>
 <div id="app"></div>
+<script>window.__WRITABLE__={{WRITABLE}};</script>
 <script>${js}</script>
 </body>
 </html>`;

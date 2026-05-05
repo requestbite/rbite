@@ -1,6 +1,8 @@
-import { h } from "preact";
+import { h, Fragment } from "preact";
 import { useState, useEffect, useRef } from "preact/hooks";
-import { HardDriveDownload, Copy } from "lucide-preact";
+import { HardDriveDownload, HardDriveUpload, Copy } from "lucide-preact";
+
+const writable = typeof window !== "undefined" && window.__WRITABLE__ === true;
 
 function Logo() {
   return (
@@ -29,17 +31,58 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [selectedName, setSelectedName] = useState(null);
   const [toastVisible, setToastVisible] = useState(false);
+  const [toastMsg, setToastMsg] = useState("");
+  const [toastError, setToastError] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
   const clickTimerRef = useRef(null);
   const lastClickRef = useRef(null);
   const toastTimerRef = useRef(null);
+  const fileInputRef = useRef(null);
 
-  function showToast() {
+  function showToast(msg, isError) {
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    setToastMsg(msg || "Path copied to clipboard.");
+    setToastError(!!isError);
     setToastVisible(true);
     toastTimerRef.current = setTimeout(() => {
       setToastVisible(false);
       toastTimerRef.current = null;
     }, 3000);
+  }
+
+  async function uploadFiles(files) {
+    if (!files || files.length === 0) return;
+    setUploading(true);
+    const form = new FormData();
+    for (const f of files) form.append("file", f);
+    try {
+      const res = await fetch("/api/upload?path=" + encodeURIComponent(path), {
+        method: "POST",
+        body: form,
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        showToast("Upload failed: " + text, true);
+      } else {
+        const data = await res.json();
+        const count = data.saved ? data.saved.length : files.length;
+        showToast(count === 1 ? "File uploaded." : count + " files uploaded.");
+        load(path);
+      }
+    } catch (e) {
+      showToast("Upload failed: " + e.message, true);
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  function handleDrop(e) {
+    e.preventDefault();
+    setDragOver(false);
+    if (!writable) return;
+    const files = e.dataTransfer.files;
+    if (files && files.length > 0) uploadFiles(files);
   }
 
   useEffect(() => {
@@ -114,27 +157,57 @@ export default function App() {
       </div>
       <div class="bg-white rounded-lg overflow-hidden [outline:1px_solid_#d1d5db] [outline-offset:-1px]">
         <header class="bg-white py-2.5 px-4 border-b border-gray-200">
-          <nav class="flex flex-wrap gap-1 items-center text-[13px] text-gray-500">
-            {breadcrumbs().map((crumb, i, arr) => (
-              <span key={crumb.path}>
-                {i > 0 && <span class="mx-0.5 text-gray-300">/</span>}
-                {i < arr.length - 1 ? (
-                  <a
-                    href="#"
-                    class="text-sky-500 hover:underline"
-                    onClick={(e) => { e.preventDefault(); navigateBreadcrumb(crumb.path); }}
-                  >
-                    {crumb.label}
-                  </a>
-                ) : (
-                  <span class="text-gray-900 font-medium">{crumb.label}</span>
-                )}
-              </span>
-            ))}
-          </nav>
+          <div class="flex items-center gap-2">
+            <nav class="flex flex-wrap gap-1 items-center text-[13px] text-gray-500 flex-1 min-w-0">
+              {breadcrumbs().map((crumb, i, arr) => (
+                <span key={crumb.path}>
+                  {i > 0 && <span class="mx-0.5 text-gray-300">/</span>}
+                  {i < arr.length - 1 ? (
+                    <a
+                      href="#"
+                      class="text-sky-500 hover:underline"
+                      onClick={(e) => { e.preventDefault(); navigateBreadcrumb(crumb.path); }}
+                    >
+                      {crumb.label}
+                    </a>
+                  ) : (
+                    <span class="text-gray-900 font-medium">{crumb.label}</span>
+                  )}
+                </span>
+              ))}
+            </nav>
+            {writable && (
+              <>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  multiple
+                  class="hidden"
+                  onChange={(e) => {
+                    uploadFiles(e.target.files);
+                    e.target.value = "";
+                  }}
+                />
+                <button
+                  class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[12px] font-medium bg-blue-50 text-sky-500 hover:bg-blue-100 transition-colors duration-150 shrink-0"
+                  disabled={uploading}
+                  onClick={() => fileInputRef.current && fileInputRef.current.click()}
+                  title="Upload files to current directory"
+                >
+                  <HardDriveUpload size={13} />
+                  {uploading ? "Uploading…" : "Upload"}
+                </button>
+              </>
+            )}
+          </div>
         </header>
 
-        <main>
+        <main
+          onDragOver={writable ? (e) => { e.preventDefault(); setDragOver(true); } : undefined}
+          onDragLeave={writable ? () => setDragOver(false) : undefined}
+          onDrop={writable ? handleDrop : undefined}
+          class={dragOver ? "ring-2 ring-sky-400 ring-inset" : ""}
+        >
           {error && (
             <div class="bg-red-50 border border-red-200 text-red-600 px-4 py-3 m-3 rounded-md">
               {error}
@@ -178,7 +251,7 @@ export default function App() {
                           const dirPath = path ? path + "/" + e.name : e.name;
                           const url = window.location.origin + window.location.pathname + "#/" + dirPath;
                           navigator.clipboard.writeText(url);
-                          showToast();
+                          showToast("Path copied to clipboard.");
                         }}
                       >
                         <Copy size={15} />
@@ -214,11 +287,17 @@ export default function App() {
         class={`fixed bottom-5 right-5 transition-all duration-300 ${toastVisible ? "opacity-100 translate-y-0" : "opacity-0 translate-y-2 pointer-events-none"}`}
         style={{ zIndex: 99999 }}
       >
-        <div class="flex items-start gap-3 rounded-lg border-2 border-green-800 bg-green-100 p-4 shadow-lg w-80">
-          <svg class="size-5 shrink-0 text-green-800 mt-0.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
-          </svg>
-          <p class="text-sm font-medium text-green-800">Path copied to clipboard.</p>
+        <div class={`flex items-start gap-3 rounded-lg border-2 p-4 shadow-lg w-80 ${toastError ? "border-red-400 bg-red-50" : "border-green-800 bg-green-100"}`}>
+          {toastError ? (
+            <svg class="size-5 shrink-0 text-red-600 mt-0.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
+            </svg>
+          ) : (
+            <svg class="size-5 shrink-0 text-green-800 mt-0.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+            </svg>
+          )}
+          <p class={`text-sm font-medium ${toastError ? "text-red-700" : "text-green-800"}`}>{toastMsg}</p>
         </div>
       </div>
     </div>
