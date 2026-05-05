@@ -10,22 +10,38 @@ _rbite() {
     local all_flags=(
         --login
         --switch-accounts
+        --whoami
         --views-list
         --views-add
         --views-tail
         --views-open
+        -f --files
+        --files-write
         -e --ephemeral
+        -t --tunnels
+        --tunnels-list
         -r --resume
         --show-qr
         --tunnel-server
         --no-upgrade-check
+        --uninstall
         -h --help
         -v --version
     )
 
     case "$prev" in
+        -f|--files|--files-write)
+            # Expects a directory path
+            _filedir -d
+            return 0
+            ;;
         -e|--ephemeral)
             # Expects a port number; offer nothing to let the user type freely
+            COMPREPLY=()
+            return 0
+            ;;
+        -t|--tunnels)
+            # Expects a tunnel name; offer nothing
             COMPREPLY=()
             return 0
             ;;

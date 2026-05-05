@@ -6,12 +6,12 @@ rbite \- CLI client for RequestBite
 [\fIOPTIONS\fR]
 .SH DESCRIPTION
 .B rbite
-is the command-line client for RequestBite, a service with tools that helps
-you build and use HTTP-based APIs. Currently the rbite command can create
-short-lived public URL that forwards traffic to a port on your local machine (an
-\fIephemeral tunnel\fR), resume a tunnel session that is still active, and
-manage \fIinspector views\fR \(em persistent capture endpoints whose incoming
-webhook / HTTP requests you can stream and inspect in real time.
+is the command-line client for RequestBite, a service with tools that helps you
+build and use HTTP-based APIs. The rbite command can expose locally running
+services via both persistent (on paid plans) and short-lived ephemeral (free)
+public URLs, resume a tunnel session that is still active, and manage
+\fIinspector views\fR \(em persistent capture endpoints whose incoming webhook /
+HTTP requests you can stream and inspect in real time.
 .PP
 On first run
 .B rbite
@@ -31,6 +31,12 @@ Run this command before using any feature that requires an authenticated account
 Interactively select which account to make active when more than one account
 has been authenticated.
 The selected account ID is persisted to the configuration file.
+.TP
+.B \-\-whoami
+Print the name, email address, and active account of the currently authenticated
+user.
+If the access token has expired it is refreshed silently using the stored refresh
+token.
 .SS Request views
 .TP
 .B \-\-views\-list
@@ -60,6 +66,26 @@ If \fIview-id\fR is omitted,
 prompts for a selection from the available views.
 .SS Tunnel management
 .TP
+\fB\-f\fR \fIdir\fR, \fB\-\-files\fR \fIdir\fR
+Start a built-in file browser for the local directory \fIdir\fR and expose it
+over an ephemeral tunnel.
+The browser is read-only: visitors can navigate and download files but cannot
+upload.
+Mutually exclusive with
+.B \-\-ephemeral
+and
+.BR \-\-resume .
+.TP
+\fB\-fw\fR \fIdir\fR, \fB\-\-files\-write\fR \fIdir\fR
+Identical to
+.B \-\-files
+but also enables file uploads.
+Visitors can upload files into any directory shown in the browser.
+Mutually exclusive with
+.B \-\-ephemeral
+and
+.BR \-\-resume .
+.TP
 \fB\-e\fR \fIport\fR, \fB\-\-ephemeral\fR \fIport\fR
 Create an ephemeral tunnel exposing the local TCP port \fIport\fR to the public
 internet.
@@ -67,7 +93,19 @@ internet.
 prints the assigned public URL and keeps the tunnel open until it is interrupted
 with
 .BR Ctrl\-C .
-The tunnel session expires automatically fixed interval.
+The tunnel session expires automatically after a fixed interval.
+.TP
+\fB\-t\fR \fIname\fR, \fB\-\-tunnels\fR \fIname\fR
+Connect to the permanent tunnel identified by \fIname\fR (or its UUID). The
+tunnel must already exist and be enabled in RequestBite HQ
+(https://hq.requestbite.com). Credentials are fetched from the API
+automatically. Mutually exclusive with
+.BR \-\-resume .
+.TP
+.B \-\-tunnels\-list
+Print all permanent tunnels associated with the current account and
+interactively show details for a selected tunnel.
+Requires an authenticated session.
 .TP
 .BR \-r ", " \-\-resume
 Resume the most recent tunnel session for this client if it has not yet expired.
@@ -75,13 +113,17 @@ Resume the most recent tunnel session for this client if it has not yet expired.
 retrieves the existing public URL from the server and reopens the tunnel
 connection without allocating a new address.
 Mutually exclusive with
-.BR \-\-ephemeral .
+.B \-\-ephemeral
+and
+.BR \-\-tunnels .
 .TP
 .B \-\-show\-qr
 Print a QR code of the public tunnel URL to the terminal after the tunnel is
 established.
 Intended for use with
-.B \-\-ephemeral
+.BR \-\-ephemeral ,
+.BR \-\-files ,
+.BR \-\-files\-write ,
 or
 .BR \-\-resume .
 Scan the code with a phone camera to open the tunnel URL directly on the device.
@@ -98,6 +140,12 @@ Useful for self-hosted deployments or local development.
 Suppress the automatic check for a newer version of
 .B rbite
 that normally runs at startup.
+.TP
+.B \-\-uninstall
+Interactively remove the
+.B rbite
+binary, configuration directory, shell completion files, and man page.
+Each step prompts for confirmation before proceeding.
 .TP
 .BR \-h ", " \-\-help
 Print a short usage summary and exit.
@@ -116,9 +164,34 @@ Resume the last active tunnel session:
 rbite \-\-resume
 .EE
 .TP
+Share the current directory as a read-only file browser:
+.EX
+rbite \-f .
+.EE
+.TP
+Share the current directory with upload support:
+.EX
+rbite \-fw .
+.EE
+.TP
+Share a specific directory with upload support and show a QR code:
+.EX
+rbite \-\-files\-write ~/Downloads \-\-show\-qr
+.EE
+.TP
+Connect a permanent tunnel named \fImyapp\fR:
+.EX
+rbite \-t myapp
+.EE
+.TP
 Log in to a RequestBite account:
 .EX
 rbite \-\-login
+.EE
+.TP
+Show the currently authenticated user:
+.EX
+rbite \-\-whoami
 .EE
 .TP
 List all inspector views for the current account:

@@ -6,17 +6,27 @@
 _rbite() {
     local -a args
     args=(
+        # Account management
         '--login[Log in via browser]'
         '--switch-accounts[Switch the active account]'
+        '--whoami[Show logged-in user and account details]'
+        # Request views
         '--views-list[List all active inspector views for the current account]'
         '--views-add[Create a new inspector view (name is optional)]:view name:'
         '--views-tail[Stream live requests for a view (prompts for selection if no ID given)]:view id:'
         '--views-open[Open a view capture URL in the browser (prompts for selection if no ID given)]:view id:'
+        # Tunnel management
+        '(-f --files)'{-f,--files}'[Share a local directory via ephemeral tunnel (read-only)]:directory:_files -/'
+        '--files-write[Share a local directory via ephemeral tunnel with upload support (read/write)]:directory:_files -/'
         '(-e --ephemeral)'{-e,--ephemeral}'[Port to expose via ephemeral tunnel]:port:'
+        '(-t --tunnels)'{-t,--tunnels}'[Connect a permanent tunnel by name]:tunnel name:'
+        '--tunnels-list[List tunnels for the current account]'
         '(-r --resume)'{-r,--resume}'[Resume the last tunnel session if not expired]'
         '--show-qr[Print a QR code of the tunnel URL (use with -e or -r)]'
         '--tunnel-server[Tunnel server URL]:url:'
+        # Other
         '--no-upgrade-check[Disable automatic upgrade check on startup]'
+        '--uninstall[Uninstall rbite (interactive)]'
         '(-h --help)'{-h,--help}'[Show help information]'
         '(-v --version)'{-v,--version}'[Show version and build information]'
     )
