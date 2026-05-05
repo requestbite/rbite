@@ -28,8 +28,19 @@ export default function App() {
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(false);
   const [selectedName, setSelectedName] = useState(null);
+  const [toastVisible, setToastVisible] = useState(false);
   const clickTimerRef = useRef(null);
   const lastClickRef = useRef(null);
+  const toastTimerRef = useRef(null);
+
+  function showToast() {
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    setToastVisible(true);
+    toastTimerRef.current = setTimeout(() => {
+      setToastVisible(false);
+      toastTimerRef.current = null;
+    }, 3000);
+  }
 
   useEffect(() => {
     const hash = "#/" + path;
@@ -167,6 +178,7 @@ export default function App() {
                           const dirPath = path ? path + "/" + e.name : e.name;
                           const url = window.location.origin + window.location.pathname + "#/" + dirPath;
                           navigator.clipboard.writeText(url);
+                          showToast();
                         }}
                       >
                         <Copy size={15} />
@@ -198,6 +210,17 @@ export default function App() {
         Read more at <a href="https://requestbite.com/tunnel" class="text-sky-500 hover:underline" target="_blank" rel="noopener noreferrer">requestbite.com/tunnel</a>.
       </p>
       <p class="font-jetbrains text-[11px] text-gray-400 text-center tracking-[0.04em] mt-4 leading-[1.8]">rbite {"{{VERSION}}"}</p>
+      <div
+        class={`fixed bottom-5 right-5 transition-all duration-300 ${toastVisible ? "opacity-100 translate-y-0" : "opacity-0 translate-y-2 pointer-events-none"}`}
+        style={{ zIndex: 99999 }}
+      >
+        <div class="flex items-start gap-3 rounded-lg border-2 border-green-800 bg-green-100 p-4 shadow-lg w-80">
+          <svg class="size-5 shrink-0 text-green-800 mt-0.5" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" aria-hidden="true">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
+          </svg>
+          <p class="text-sm font-medium text-green-800">Path copied to clipboard.</p>
+        </div>
+      </div>
     </div>
   );
 }
