@@ -1,6 +1,6 @@
 import { h } from "preact";
 import { useState, useEffect, useRef } from "preact/hooks";
-import { HardDriveDownload } from "lucide-preact";
+import { HardDriveDownload, Copy } from "lucide-preact";
 
 function Logo() {
   return (
@@ -154,6 +154,24 @@ export default function App() {
                         </span>
                       )}
                     </span>
+                    {e.isDir && (
+                      <button
+                        class={`inline-flex items-center justify-center w-[26px] h-[26px] rounded-md shrink-0 transition-colors duration-150 ${
+                          selected
+                            ? "bg-white/25 text-white hover:bg-white/40"
+                            : "bg-blue-50 text-sky-500 hover:bg-blue-100"
+                        }`}
+                        title="Copy link"
+                        onClick={(ev) => {
+                          ev.stopPropagation();
+                          const dirPath = path ? path + "/" + e.name : e.name;
+                          const url = window.location.origin + window.location.pathname + "#/" + dirPath;
+                          navigator.clipboard.writeText(url);
+                        }}
+                      >
+                        <Copy size={15} />
+                      </button>
+                    )}
                     {!e.isDir && (
                       <a
                         class={`inline-flex items-center justify-center w-[26px] h-[26px] rounded-md shrink-0 transition-colors duration-150 ${

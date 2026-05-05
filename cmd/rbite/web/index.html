@@ -1401,6 +1401,12 @@ a {
     return Component;
   };
 
+  // web/node_modules/lucide-preact/dist/esm/icons/copy.js
+  var Copy = createLucideIcon("copy", [
+    ["rect", { width: "14", height: "14", x: "8", y: "8", rx: "2", ry: "2", key: "17jyea" }],
+    ["path", { d: "M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2", key: "zix9uf" }]
+  ]);
+
   // web/node_modules/lucide-preact/dist/esm/icons/hard-drive-download.js
   var HardDriveDownload = createLucideIcon("hard-drive-download", [
     ["path", { d: "M12 2v8", key: "1q4o3n" }],
@@ -1507,6 +1513,20 @@ a {
         },
         /* @__PURE__ */ k("span", { class: "text-[15px] leading-none shrink-0" }, e3.isDir ? "\u{1F4C1}" : "\u{1F4C4}"),
         /* @__PURE__ */ k("span", { class: "flex-1 text-[13px] min-w-0 overflow-hidden text-ellipsis whitespace-nowrap flex items-center gap-2" }, e3.name, !e3.isDir && /* @__PURE__ */ k("span", { class: `text-xs whitespace-nowrap ${selected ? "text-white/75" : "text-gray-400"}` }, formatSize(e3.size))),
+        e3.isDir && /* @__PURE__ */ k(
+          "button",
+          {
+            class: `inline-flex items-center justify-center w-[26px] h-[26px] rounded-md shrink-0 transition-colors duration-150 ${selected ? "bg-white/25 text-white hover:bg-white/40" : "bg-blue-50 text-sky-500 hover:bg-blue-100"}`,
+            title: "Copy link",
+            onClick: (ev) => {
+              ev.stopPropagation();
+              const dirPath = path ? path + "/" + e3.name : e3.name;
+              const url = window.location.origin + window.location.pathname + "#/" + dirPath;
+              navigator.clipboard.writeText(url);
+            }
+          },
+          /* @__PURE__ */ k(Copy, { size: 15 })
+        ),
         !e3.isDir && /* @__PURE__ */ k(
           "a",
           {
@@ -1530,6 +1550,7 @@ lucide-preact/dist/esm/shared/src/utils.js:
 lucide-preact/dist/esm/defaultAttributes.js:
 lucide-preact/dist/esm/Icon.js:
 lucide-preact/dist/esm/createLucideIcon.js:
+lucide-preact/dist/esm/icons/copy.js:
 lucide-preact/dist/esm/icons/hard-drive-download.js:
 lucide-preact/dist/esm/lucide-preact.js:
   (**
