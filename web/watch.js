@@ -1,11 +1,20 @@
 const esbuild = require("esbuild");
+const { execSync } = require("child_process");
 const path = require("path");
 const fs = require("fs");
-const css = require("./styles");
 
+const twBin = path.join(__dirname, "node_modules", ".bin", "tailwindcss");
+const tmpCss = path.join(__dirname, ".tailwind-tmp.css");
 const outPath = path.join(__dirname, "../cmd/rbite/web/index.html");
 
-function writeHtml(js) {
+function buildCss() {
+  execSync(`"${twBin}" -i src/input.css -o "${tmpCss}"`, { cwd: __dirname, stdio: "pipe" });
+  const css = fs.readFileSync(tmpCss, "utf8");
+  try { fs.unlinkSync(tmpCss); } catch {}
+  return css;
+}
+
+function writeHtml(js, css) {
   const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -41,7 +50,8 @@ function writeHtml(js) {
       setup(build) {
         build.onEnd(result => {
           if (result.errors.length === 0) {
-            writeHtml(result.outputFiles[0].text);
+            const css = buildCss();
+            writeHtml(result.outputFiles[0].text, css);
           }
         });
       },

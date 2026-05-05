@@ -1,0 +1,23 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 14px;
+    line-height: 1.6;
+    @apply bg-gray-50 text-gray-900 min-h-screen;
+    padding: 32px 16px;
+  }
+
+  a {
+    text-decoration: none;
+  }
+
+  @media (max-width: 600px) {
+    body {
+      padding: 16px 12px;
+    }
+  }
+}

@@ -1,5 +1,6 @@
 import { h } from "preact";
 import { useState, useEffect, useRef } from "preact/hooks";
+import { HardDriveDownload } from "lucide-preact";
 
 function Logo() {
   return (
@@ -19,18 +20,6 @@ function formatSize(bytes) {
   if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
   if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + " MB";
   return (bytes / (1024 * 1024 * 1024)).toFixed(1) + " GB";
-}
-
-function HardDriveDownloadIcon() {
-  return (
-    <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M12 2v8"/>
-      <path d="m16 6-4 4-4-4"/>
-      <rect width="20" height="8" x="2" y="14" rx="2"/>
-      <path d="M6 18h.01"/>
-      <path d="M10 18h.01"/>
-    </svg>
-  );
 }
 
 export default function App() {
@@ -107,23 +96,27 @@ export default function App() {
   }
 
   return (
-    <div class="page">
-      <div class="page-header">
+    <div class="max-w-[880px] mx-auto">
+      <div class="flex flex-col items-center mb-5 gap-2.5">
         <Logo />
-        <p class="site-title">RequestBite Tunnel</p>
+        <p class="font-jetbrains text-sm text-gray-400 tracking-[0.04em] text-center">RequestBite Tunnel</p>
       </div>
-      <div class="browser-card">
-        <header>
-          <nav class="breadcrumb">
+      <div class="bg-white rounded-lg overflow-hidden [outline:1px_solid_#d1d5db] [outline-offset:-1px]">
+        <header class="bg-white py-2.5 px-4 border-b border-gray-200">
+          <nav class="flex flex-wrap gap-1 items-center text-[13px] text-gray-500">
             {breadcrumbs().map((crumb, i, arr) => (
               <span key={crumb.path}>
-                {i > 0 && <span class="sep">/</span>}
+                {i > 0 && <span class="mx-0.5 text-gray-300">/</span>}
                 {i < arr.length - 1 ? (
-                  <a href="#" onClick={(e) => { e.preventDefault(); navigateBreadcrumb(crumb.path); }}>
+                  <a
+                    href="#"
+                    class="text-sky-500 hover:underline"
+                    onClick={(e) => { e.preventDefault(); navigateBreadcrumb(crumb.path); }}
+                  >
                     {crumb.label}
                   </a>
                 ) : (
-                  <span class="current">{crumb.label}</span>
+                  <span class="text-gray-900 font-medium">{crumb.label}</span>
                 )}
               </span>
             ))}
@@ -131,48 +124,62 @@ export default function App() {
         </header>
 
         <main>
-          {error && <div class="error">{error}</div>}
-          {loading && <div class="loading">Loading…</div>}
+          {error && (
+            <div class="bg-red-50 border border-red-200 text-red-600 px-4 py-3 m-3 rounded-md">
+              {error}
+            </div>
+          )}
+          {loading && <div class="text-gray-400 py-10 px-4 text-center">Loading…</div>}
           {!loading && !error && entries.length === 0 && (
-            <div class="empty">Empty directory</div>
+            <div class="text-gray-400 py-10 px-4 text-center">Empty directory</div>
           )}
           {!loading && !error && entries.length > 0 && (
-            <div class="file-list">
-              {entries.map((e) => (
-                <div
-                  key={e.name}
-                  class={`file-row${selectedName === e.name ? " selected" : ""}`}
-                  onClick={() => handleRowClick(e)}
-                >
-                  <span class="row-icon">{e.isDir ? "📁" : "📄"}</span>
-                  <span class="row-name">
-                    {e.name}
+            <div>
+              {entries.map((e) => {
+                const selected = selectedName === e.name;
+                return (
+                  <div
+                    key={e.name}
+                    class={`flex items-center px-3 max-[600px]:px-[10px] py-1 border-t border-gray-100 first:border-t-0 cursor-pointer select-none gap-2.5 min-h-[36px] ${
+                      selected ? "bg-sky-500 text-white" : "text-gray-700 hover:bg-gray-50"
+                    }`}
+                    onClick={() => handleRowClick(e)}
+                  >
+                    <span class="text-[15px] leading-none shrink-0">{e.isDir ? "📁" : "📄"}</span>
+                    <span class="flex-1 text-[13px] min-w-0 overflow-hidden text-ellipsis whitespace-nowrap flex items-center gap-2">
+                      {e.name}
+                      {!e.isDir && (
+                        <span class={`text-xs whitespace-nowrap ${selected ? "text-white/75" : "text-gray-400"}`}>
+                          {formatSize(e.size)}
+                        </span>
+                      )}
+                    </span>
                     {!e.isDir && (
-                      <span class="row-size">{formatSize(e.size)}</span>
+                      <a
+                        class={`inline-flex items-center justify-center w-[26px] h-[26px] rounded-md shrink-0 transition-colors duration-150 ${
+                          selected
+                            ? "bg-white/25 text-white hover:bg-white/40"
+                            : "bg-blue-50 text-sky-500 hover:bg-blue-100"
+                        }`}
+                        href={"/api/download?path=" + encodeURIComponent(path ? path + "/" + e.name : e.name)}
+                        title="Download"
+                        onClick={(ev) => ev.stopPropagation()}
+                      >
+                        <HardDriveDownload size={15} />
+                      </a>
                     )}
-                  </span>
-                  {!e.isDir && (
-                    <a
-                      class="download-btn"
-                      href={"/api/download?path=" + encodeURIComponent(path ? path + "/" + e.name : e.name)}
-                      title="Download"
-                      onClick={(ev) => ev.stopPropagation()}
-                    >
-                      <HardDriveDownloadIcon />
-                    </a>
-                  )}
-                </div>
-              ))}
+                  </div>
+                );
+              })}
             </div>
           )}
         </main>
       </div>
-      <p class="footer-hint">
+      <p class="font-jetbrains text-[11px] text-gray-400 text-center tracking-[0.04em] mt-4 leading-[1.8]">
         Easily share your localhost through a RequestBite Tunnel.<br />
-        Read more at <a href="https://requestbite.com/tunnel" target="_blank" rel="noopener noreferrer">requestbite.com/tunnel</a>.
+        Read more at <a href="https://requestbite.com/tunnel" class="text-sky-500 hover:underline" target="_blank" rel="noopener noreferrer">requestbite.com/tunnel</a>.
       </p>
-      <p class="footer-hint">rbite {"{{VERSION}}"}</p>
+      <p class="font-jetbrains text-[11px] text-gray-400 text-center tracking-[0.04em] mt-4 leading-[1.8]">rbite {"{{VERSION}}"}</p>
     </div>
   );
 }
-

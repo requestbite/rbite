@@ -1,7 +1,17 @@
 const esbuild = require("esbuild");
+const { execSync } = require("child_process");
 const path = require("path");
 const fs = require("fs");
-const css = require("./styles");
+
+const twBin = path.join(__dirname, "node_modules", ".bin", "tailwindcss");
+const tmpCss = path.join(__dirname, ".tailwind-tmp.css");
+
+execSync(`"${twBin}" -i src/input.css -o "${tmpCss}" --minify`, {
+  cwd: __dirname,
+  stdio: "inherit",
+});
+const css = fs.readFileSync(tmpCss, "utf8");
+fs.unlinkSync(tmpCss);
 
 const result = esbuild.buildSync({
   entryPoints: [path.join(__dirname, "src/index.jsx")],
