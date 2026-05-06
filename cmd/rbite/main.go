@@ -45,6 +45,10 @@ var fileServerHTML string
 // errSessionExpired is returned when the refresh token is also invalid, requiring re-login.
 var errSessionExpired = errors.New("session expired")
 
+// errTunnelTerminated is returned when the server explicitly closes the tunnel
+// with close code 4000, indicating the client must not attempt to reconnect.
+var errTunnelTerminated = errors.New("tunnel terminated by server")
+
 // Version information — set via ldflags at build time.
 var (
 	Version             = "dev"
@@ -476,7 +480,7 @@ func runFileServer(rootPath string, showQR bool, serverURL string, writable bool
 	}()
 
 	localAddr := fmt.Sprintf("localhost:%d", port)
-	connectToTunnelServer(ctx, serverURL, cfg.ClientID, localAddr, expiresAt)
+	connectEphemeralWithReconnect(ctx, serverURL, cfg.ClientID, localAddr, expiresAt)
 	printSessionStats(serverURL, cfg.ClientID)
 	return nil
 }
@@ -845,7 +849,7 @@ func main() {
 
 	// Connect to tunnel server; blocks until the session ends.
 	localAddr := fmt.Sprintf("localhost:%d", ephemeralPort)
-	connectToTunnelServer(ctx, serverURL, clientID, localAddr, expiresAt)
+	connectEphemeralWithReconnect(ctx, serverURL, clientID, localAddr, expiresAt)
 
 	// Fetch and print session stats once the tunnel is done.
 	printSessionStats(serverURL, clientID)
@@ -1136,14 +1140,40 @@ func toWSURL(serverURL string) string {
 	return serverURL
 }
 
-func connectToTunnelServer(ctx context.Context, serverURL, clientID, localAddr string, expiresAt time.Time) {
+// reconnectBackoff is the sequence of delays between reconnect attempts.
+// The last value is reused for all subsequent attempts.
+var reconnectBackoff = []time.Duration{
+	1 * time.Second,
+	2 * time.Second,
+	4 * time.Second,
+	8 * time.Second,
+	16 * time.Second,
+	30 * time.Second,
+}
+
+const (
+	// reconnectBudget is the maximum total time spent attempting to reconnect
+	// after an unexpected disconnect before giving up entirely.
+	reconnectBudget = 3 * time.Minute
+	// reconnectResetThreshold resets the attempt counter and deadline when a
+	// connection lasted longer than this before dropping, so a healthy long-lived
+	// tunnel that eventually drops gets a fresh reconnect budget.
+	reconnectResetThreshold = 30 * time.Second
+)
+
+// connectEphemeralOnce opens a single yamux-over-WebSocket connection for an
+// ephemeral tunnel.  It returns:
+//   - nil when the expiry timer fires or the context is cancelled (clean exit)
+//   - errTunnelTerminated when the server sends close code 4000 (do not reconnect)
+//   - any other error for unexpected disconnects (caller may reconnect)
+func connectEphemeralOnce(ctx context.Context, serverURL, clientID, localAddr string, expiresAt time.Time) error {
 	muxURL := toWSURL(serverURL) + "/tunnel/mux?client_id=" + clientID
 	ws, resp, err := websocket.DefaultDialer.Dial(muxURL, nil)
 	if err != nil {
 		if resp != nil {
-			log.Fatalf("mux dial failed (HTTP %d): %v", resp.StatusCode, err)
+			return fmt.Errorf("mux dial failed (HTTP %d): %w", resp.StatusCode, err)
 		}
-		log.Fatalf("mux dial failed: %v", err)
+		return fmt.Errorf("mux dial failed: %w", err)
 	}
 	defer ws.Close()
 
@@ -1152,12 +1182,11 @@ func connectToTunnelServer(ctx context.Context, serverURL, clientID, localAddr s
 	// The tunnel client accepts streams opened by the server → yamux.Server role.
 	session, err := yamux.Server(conn, nil)
 	if err != nil {
-		log.Fatalf("yamux session failed: %v", err)
+		return fmt.Errorf("yamux session failed: %w", err)
 	}
 	defer session.Close()
 
 	// Keep the WebSocket alive so proxies don't kill idle connections.
-	// Uses conn.ping() so the mutex serialises with yamux data writes.
 	go func() {
 		t := time.NewTicker(20 * time.Second)
 		defer t.Stop()
@@ -1194,16 +1223,62 @@ func connectToTunnelServer(ctx context.Context, serverURL, clientID, localAddr s
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		case <-expiry.C:
 			log.Printf("Tunnel expired. Disconnecting.")
-			return
+			return nil
 		case err := <-errCh:
-			log.Printf("mux session closed: %v", err)
-			return
+			if errors.Is(err, errTunnelTerminated) {
+				return errTunnelTerminated
+			}
+			return fmt.Errorf("mux session closed: %w", err)
 		case stream := <-streamCh:
 			go handleTunneledConnection(stream, localAddr)
 		}
+	}
+}
+
+// connectEphemeralWithReconnect wraps connectEphemeralOnce with exponential-backoff
+// reconnect logic.  It reconnects on unexpected disconnects for up to reconnectBudget,
+// and stops immediately on a clean exit, context cancellation, or errTunnelTerminated.
+func connectEphemeralWithReconnect(ctx context.Context, serverURL, clientID, localAddr string, expiresAt time.Time) {
+	attempt := 0
+	deadline := time.Now().Add(reconnectBudget)
+
+	for {
+		connectedAt := time.Now()
+		err := connectEphemeralOnce(ctx, serverURL, clientID, localAddr, expiresAt)
+
+		if ctx.Err() != nil {
+			return
+		}
+		if err == nil {
+			return
+		}
+		if errors.Is(err, errTunnelTerminated) {
+			log.Printf("Tunnel terminated by server.")
+			return
+		}
+
+		// Unexpected disconnect. Reset the budget if this connection was healthy.
+		if time.Since(connectedAt) > reconnectResetThreshold {
+			attempt = 0
+			deadline = time.Now().Add(reconnectBudget)
+		}
+
+		if time.Now().After(deadline) {
+			log.Printf("Could not reconnect within %v, giving up: %v", reconnectBudget, err)
+			return
+		}
+
+		delay := reconnectBackoff[min(attempt, len(reconnectBackoff)-1)]
+		log.Printf("Connection lost (%v), reconnecting in %v... (attempt %d)", err, delay, attempt+1)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(delay):
+		}
+		attempt++
 	}
 }
 
@@ -1339,6 +1414,12 @@ func (c *wsConn) Read(b []byte) (int, error) {
 		}
 		msgType, r, err := c.ws.NextReader()
 		if err != nil {
+			// Close code 4000 means the server is intentionally terminating this
+			// tunnel; the client must not attempt to reconnect.
+			var closeErr *websocket.CloseError
+			if errors.As(err, &closeErr) && closeErr.Code == 4000 {
+				return 0, errTunnelTerminated
+			}
 			return 0, err
 		}
 		if msgType == websocket.CloseMessage {
@@ -2823,27 +2904,29 @@ func runPermanentTunnel(serverURL, apiURL, tID string, localPort int, showQR boo
 	} else {
 		localAddr = "localhost" // dynamic: port derived per-request from X-RBite-Port header
 	}
-	connectPermanentToTunnelServer(ctx, serverURL, resolvedID, details.Token, localAddr)
+	connectPermanentWithReconnect(ctx, serverURL, resolvedID, details.Token, localAddr)
 }
 
-// connectPermanentToTunnelServer opens a yamux-over-WebSocket connection to the
-// tunnel server for a permanent tunnel.  Unlike ephemeral tunnels there is no
-// expiry timer — the connection runs until the context is cancelled or the
-// server closes the session.
-func connectPermanentToTunnelServer(ctx context.Context, serverURL, tID, token, localAddr string) {
+// connectPermanentOnce opens a single yamux-over-WebSocket connection for a
+// permanent tunnel.  It returns:
+//   - nil when the context is cancelled (clean exit)
+//   - errTunnelTerminated when the server sends close code 4000, or when the
+//     WebSocket upgrade is rejected with 401/409 (do not reconnect)
+//   - any other error for unexpected disconnects (caller may reconnect)
+func connectPermanentOnce(ctx context.Context, serverURL, tID, token, localAddr string) error {
 	muxURL := toWSURL(serverURL) + "/tunnel/mux?client_id=" + url.QueryEscape(tID) + "&token=" + url.QueryEscape(token)
 	ws, resp, err := websocket.DefaultDialer.Dial(muxURL, nil)
 	if err != nil {
 		if resp != nil {
 			if resp.StatusCode == http.StatusUnauthorized {
-				log.Fatalf("tunnel server rejected the connection: invalid token (try fetching fresh tunnel details)")
+				return fmt.Errorf("%w: invalid token (try fetching fresh tunnel details)", errTunnelTerminated)
 			}
 			if resp.StatusCode == http.StatusConflict {
-				log.Fatalf("tunnel is already active elsewhere — disconnect the other client first")
+				return fmt.Errorf("%w: tunnel is already active elsewhere — disconnect the other client first", errTunnelTerminated)
 			}
-			log.Fatalf("mux dial failed (HTTP %d): %v", resp.StatusCode, err)
+			return fmt.Errorf("mux dial failed (HTTP %d): %w", resp.StatusCode, err)
 		}
-		log.Fatalf("mux dial failed: %v", err)
+		return fmt.Errorf("mux dial failed: %w", err)
 	}
 	defer ws.Close()
 
@@ -2851,12 +2934,11 @@ func connectPermanentToTunnelServer(ctx context.Context, serverURL, tID, token, 
 
 	session, err := yamux.Server(conn, nil)
 	if err != nil {
-		log.Fatalf("yamux session failed: %v", err)
+		return fmt.Errorf("yamux session failed: %w", err)
 	}
 	defer session.Close()
 
 	// Keep the WebSocket alive so proxies don't kill idle connections.
-	// Uses conn.ping() so the mutex serialises with yamux data writes.
 	go func() {
 		t := time.NewTicker(20 * time.Second)
 		defer t.Stop()
@@ -2890,12 +2972,59 @@ func connectPermanentToTunnelServer(ctx context.Context, serverURL, tID, token, 
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		case err := <-errCh:
-			log.Printf("mux session closed: %v", err)
-			return
+			if errors.Is(err, errTunnelTerminated) {
+				return errTunnelTerminated
+			}
+			return fmt.Errorf("mux session closed: %w", err)
 		case stream := <-streamCh:
 			go handleTunneledConnection(stream, localAddr)
 		}
+	}
+}
+
+// connectPermanentWithReconnect wraps connectPermanentOnce with exponential-backoff
+// reconnect logic.  Unlike ephemeral tunnels there is no expiry timer — the
+// connection runs until the context is cancelled, the server terminates it, or
+// the reconnect budget is exhausted.
+func connectPermanentWithReconnect(ctx context.Context, serverURL, tID, token, localAddr string) {
+	attempt := 0
+	deadline := time.Now().Add(reconnectBudget)
+
+	for {
+		connectedAt := time.Now()
+		err := connectPermanentOnce(ctx, serverURL, tID, token, localAddr)
+
+		if ctx.Err() != nil {
+			return
+		}
+		if err == nil {
+			return
+		}
+		if errors.Is(err, errTunnelTerminated) {
+			log.Printf("Tunnel terminated by server: %v", err)
+			return
+		}
+
+		// Unexpected disconnect. Reset the budget if this connection was healthy.
+		if time.Since(connectedAt) > reconnectResetThreshold {
+			attempt = 0
+			deadline = time.Now().Add(reconnectBudget)
+		}
+
+		if time.Now().After(deadline) {
+			log.Printf("Could not reconnect within %v, giving up: %v", reconnectBudget, err)
+			return
+		}
+
+		delay := reconnectBackoff[min(attempt, len(reconnectBackoff)-1)]
+		log.Printf("Connection lost (%v), reconnecting in %v... (attempt %d)", err, delay, attempt+1)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(delay):
+		}
+		attempt++
 	}
 }
