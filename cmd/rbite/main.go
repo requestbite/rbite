@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"errors"
+	"regexp"
 	"sync"
 
 	"github.com/google/uuid"
@@ -44,6 +45,52 @@ var fileServerHTML string
 
 // errSessionExpired is returned when the refresh token is also invalid, requiring re-login.
 var errSessionExpired = errors.New("session expired")
+
+// localhostPattern matches any localhost-style URL origin (scheme + host + optional port).
+// Captured text is replaced wholesale with the tunnel's public URL.
+var localhostPattern = regexp.MustCompile(`https?://(localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0)(:\d+)?`)
+
+// rewriteConfig carries the parameters for localhost-URL rewriting in proxied responses.
+// A nil pointer means rewriting is disabled.
+type rewriteConfig struct {
+	publicURL string // e.g., "https://abc123.t.rbite.dev"
+}
+
+// portedPublicURL inserts -{port} after the first subdomain label of publicURL.
+// e.g. ("https://foo.t.rbite.dev", "8080") → "https://foo-8080.t.rbite.dev"
+// Returns publicURL unchanged when port is empty.
+func portedPublicURL(publicURL, port string) string {
+	if port == "" {
+		return publicURL
+	}
+	schemeEnd := strings.Index(publicURL, "://")
+	if schemeEnd < 0 {
+		return publicURL
+	}
+	rest := publicURL[schemeEnd+3:]
+	dotIdx := strings.IndexByte(rest, '.')
+	if dotIdx < 0 {
+		return publicURL + "-" + port
+	}
+	return publicURL[:schemeEnd+3] + rest[:dotIdx] + "-" + port + rest[dotIdx:]
+}
+
+// isTextContentType reports whether ct is a text-like MIME type whose body
+// can safely be scanned for localhost URL references.
+func isTextContentType(ct string) bool {
+	// Strip parameters (e.g., "; charset=utf-8").
+	if i := strings.IndexByte(ct, ';'); i >= 0 {
+		ct = strings.TrimSpace(ct[:i])
+	}
+	ct = strings.ToLower(ct)
+	switch ct {
+	case "text/html", "text/plain", "text/css", "text/javascript",
+		"text/xml", "application/json", "application/xml",
+		"application/javascript", "application/xhtml+xml", "image/svg+xml":
+		return true
+	}
+	return strings.HasPrefix(ct, "text/")
+}
 
 // errTunnelTerminated is returned when the server explicitly closes the tunnel
 // with close code 4000, indicating the client must not attempt to reconnect.
@@ -210,6 +257,7 @@ func printHelp() {
 	fmt.Println("\nTunnel Mgmt\n===========")
   fmt.Printf("  -e, --ephemeral int         Port to expose via ephemeral tunnel; overrides dynamic routing for -t\n")
   fmt.Printf("  -r, --resume                Resume the last tunnel session (ephemeral or permanent)\n")
+  fmt.Printf("      --localhost-rewrite      Rewrite localhost URLs in responses to the tunnel's public URL (use with -t only)\n")
   fmt.Printf("      --show-qr               Print a QR code of the tunnel URL (use with -e or -r)\n")
   fmt.Printf("      --tunnel-server string  Tunnel server URL (default %q)\n\n", defaultServer)
 	fmt.Printf("  -f, --files string          Share a local directory via ephemeral tunnel (built-in file browser, read-only)\n")
@@ -480,7 +528,7 @@ func runFileServer(rootPath string, showQR bool, serverURL string, writable bool
 	}()
 
 	localAddr := fmt.Sprintf("localhost:%d", port)
-	connectEphemeralWithReconnect(ctx, serverURL, cfg.ClientID, localAddr, expiresAt)
+	connectEphemeralWithReconnect(ctx, serverURL, cfg.ClientID, localAddr, expiresAt, nil)
 	printSessionStats(serverURL, cfg.ClientID)
 	return nil
 }
@@ -510,10 +558,11 @@ func main() {
 		tailViewID     string
 		openViewID     string
 		addViewName    string
-		showQR          bool
-		filesPath       string
-		filesWritePath  string
-		listTunnels     bool
+		showQR           bool
+		filesPath        string
+		filesWritePath   string
+		listTunnels      bool
+		localhostRewrite bool
 	)
 	defaultServer := buildDefaultServerURL()
 
@@ -543,6 +592,7 @@ func main() {
 	flag.StringVar(&tailViewID, "views-tail", "", "")
 	flag.StringVar(&openViewID, "views-open", "", "")
 	flag.StringVar(&addViewName, "views-add", "", "")
+	flag.BoolVar(&localhostRewrite, "localhost-rewrite", false, "")
 	flag.Usage = printHelp
 
 	// Pre-scan os.Args to detect --views-tail / --views-open / --views-add without a
@@ -740,19 +790,23 @@ func main() {
 
 	apiURL := resolveAPIURL(serverURL)
 
+	if localhostRewrite && tunnelID == "" {
+		log.Fatal("Error: --localhost-rewrite can only be used with -t/--tunnels")
+	}
+
 	// ── Permanent tunnel ──────────────────────────────────────────────────────
 	if tunnelID != "" {
 		if resume {
 			log.Fatal("Error: --tunnel and --resume cannot be used together; use --resume alone to reconnect the last session")
 		}
-		runPermanentTunnel(serverURL, apiURL, tunnelID, ephemeralPort, showQR, cfg)
+		runPermanentTunnel(serverURL, apiURL, tunnelID, ephemeralPort, showQR, localhostRewrite, cfg)
 		os.Exit(0)
 	}
 
 	// ── Resume ────────────────────────────────────────────────────────────────
 	if resume {
 		if cfg.LastSessionType == "permanent" && cfg.LastTunnelID != "" && cfg.LastLocalPort != 0 {
-			runPermanentTunnel(serverURL, apiURL, cfg.LastTunnelID, cfg.LastLocalPort, showQR, cfg)
+			runPermanentTunnel(serverURL, apiURL, cfg.LastTunnelID, cfg.LastLocalPort, showQR, false, cfg)
 			os.Exit(0)
 		}
 		// Fall through to ephemeral resume.
@@ -849,7 +903,7 @@ func main() {
 
 	// Connect to tunnel server; blocks until the session ends.
 	localAddr := fmt.Sprintf("localhost:%d", ephemeralPort)
-	connectEphemeralWithReconnect(ctx, serverURL, clientID, localAddr, expiresAt)
+	connectEphemeralWithReconnect(ctx, serverURL, clientID, localAddr, expiresAt, nil)
 
 	// Fetch and print session stats once the tunnel is done.
 	printSessionStats(serverURL, clientID)
@@ -1166,7 +1220,7 @@ const (
 //   - nil when the expiry timer fires or the context is cancelled (clean exit)
 //   - errTunnelTerminated when the server sends close code 4000 (do not reconnect)
 //   - any other error for unexpected disconnects (caller may reconnect)
-func connectEphemeralOnce(ctx context.Context, serverURL, clientID, localAddr string, expiresAt time.Time) error {
+func connectEphemeralOnce(ctx context.Context, serverURL, clientID, localAddr string, expiresAt time.Time, rw *rewriteConfig) error {
 	muxURL := toWSURL(serverURL) + "/tunnel/mux?client_id=" + clientID
 	ws, resp, err := websocket.DefaultDialer.Dial(muxURL, nil)
 	if err != nil {
@@ -1233,7 +1287,7 @@ func connectEphemeralOnce(ctx context.Context, serverURL, clientID, localAddr st
 			}
 			return fmt.Errorf("mux session closed: %w", err)
 		case stream := <-streamCh:
-			go handleTunneledConnection(stream, localAddr)
+			go handleTunneledConnection(stream, localAddr, rw)
 		}
 	}
 }
@@ -1241,13 +1295,13 @@ func connectEphemeralOnce(ctx context.Context, serverURL, clientID, localAddr st
 // connectEphemeralWithReconnect wraps connectEphemeralOnce with exponential-backoff
 // reconnect logic.  It reconnects on unexpected disconnects for up to reconnectBudget,
 // and stops immediately on a clean exit, context cancellation, or errTunnelTerminated.
-func connectEphemeralWithReconnect(ctx context.Context, serverURL, clientID, localAddr string, expiresAt time.Time) {
+func connectEphemeralWithReconnect(ctx context.Context, serverURL, clientID, localAddr string, expiresAt time.Time, rw *rewriteConfig) {
 	attempt := 0
 	deadline := time.Now().Add(reconnectBudget)
 
 	for {
 		connectedAt := time.Now()
-		err := connectEphemeralOnce(ctx, serverURL, clientID, localAddr, expiresAt)
+		err := connectEphemeralOnce(ctx, serverURL, clientID, localAddr, expiresAt, rw)
 
 		if ctx.Err() != nil {
 			return
@@ -1289,7 +1343,10 @@ func connectEphemeralWithReconnect(ctx context.Context, serverURL, clientID, loc
 //
 // When localAddr has no port (e.g. "localhost"), the target port is derived
 // dynamically from the X-RBite-Port header injected by the tunnel server.
-func handleTunneledConnection(stream net.Conn, localAddr string) {
+//
+// When rw is non-nil, localhost-style URLs in text response bodies and Location
+// headers are rewritten to the tunnel's public URL.
+func handleTunneledConnection(stream net.Conn, localAddr string, rw *rewriteConfig) {
 	defer stream.Close()
 
 	start := time.Now()
@@ -1318,6 +1375,12 @@ func handleTunneledConnection(stream net.Conn, localAddr string) {
 		targetAddr = localAddr + ":" + port
 	}
 
+	// When rewriting is enabled, strip Accept-Encoding so the local service sends
+	// an uncompressed body — compressed bytes cannot be text-searched for URLs.
+	if rw != nil {
+		req.Header.Del("Accept-Encoding")
+	}
+
 	localConn, err := net.Dial("tcp", targetAddr)
 	if err != nil {
 		log.Printf("local dial failed (%s): %v", targetAddr, err)
@@ -1338,6 +1401,49 @@ func handleTunneledConnection(stream net.Conn, localAddr string) {
 		return
 	}
 	defer resp.Body.Close()
+
+	// Localhost rewriting: mutate the response before forwarding it to the caller.
+	// Skip for WebSocket upgrades — the body is a raw stream, not HTTP.
+	if rw != nil && resp.StatusCode != http.StatusSwitchingProtocols {
+		extractPort := func(match string) string {
+			sub := localhostPattern.FindStringSubmatch(match)
+			if len(sub) > 2 && len(sub[2]) > 1 {
+				return sub[2][1:] // strip leading ":"
+			}
+			return ""
+		}
+
+		// Rewrite the Location header (HTTP redirects).
+		if loc := resp.Header.Get("Location"); loc != "" {
+			resp.Header.Set("Location", localhostPattern.ReplaceAllStringFunc(loc, func(match string) string {
+				return portedPublicURL(rw.publicURL, extractPort(match))
+			}))
+		}
+
+		// Rewrite text body: buffer fully, replace, update Content-Length.
+		if isTextContentType(resp.Header.Get("Content-Type")) {
+			raw, readErr := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if readErr == nil {
+				newBody := localhostPattern.ReplaceAllFunc(raw, func(match []byte) []byte {
+					sub := localhostPattern.FindSubmatch(match)
+					port := ""
+					if len(sub) > 2 && len(sub[2]) > 1 {
+						port = string(sub[2][1:])
+					}
+					return []byte(portedPublicURL(rw.publicURL, port))
+				})
+				resp.Body = io.NopCloser(bytes.NewReader(newBody))
+				resp.ContentLength = int64(len(newBody))
+				resp.TransferEncoding = nil
+				resp.Header.Del("Transfer-Encoding")
+				resp.Header.Del("Content-Encoding")
+			} else {
+				// On read error, restore original body so we still forward what we have.
+				resp.Body = io.NopCloser(bytes.NewReader(raw))
+			}
+		}
+	}
 
 	if err := resp.Write(stream); err != nil {
 		log.Printf("failed to write response: %v", err)
@@ -2848,7 +2954,7 @@ func resolveTunnelID(apiURL, accountID, nameOrID string, cfg *Config) (string, e
 // runPermanentTunnel orchestrates fetching tunnel details, printing status, and
 // connecting to the tunnel server.  It saves resume state to config before
 // connecting so that --resume works even if the process is interrupted.
-func runPermanentTunnel(serverURL, apiURL, tID string, localPort int, showQR bool, cfg *Config) {
+func runPermanentTunnel(serverURL, apiURL, tID string, localPort int, showQR bool, localhostRewrite bool, cfg *Config) {
 	if cfg.AccountID == "" {
 		log.Fatal("No account selected — run: rbite --switch-accounts")
 	}
@@ -2904,7 +3010,12 @@ func runPermanentTunnel(serverURL, apiURL, tID string, localPort int, showQR boo
 	} else {
 		localAddr = "localhost" // dynamic: port derived per-request from X-RBite-Port header
 	}
-	connectPermanentWithReconnect(ctx, serverURL, resolvedID, details.Token, localAddr)
+
+	var rw *rewriteConfig
+	if localhostRewrite {
+		rw = &rewriteConfig{publicURL: details.PublicURL}
+	}
+	connectPermanentWithReconnect(ctx, serverURL, resolvedID, details.Token, localAddr, rw)
 }
 
 // connectPermanentOnce opens a single yamux-over-WebSocket connection for a
@@ -2913,7 +3024,7 @@ func runPermanentTunnel(serverURL, apiURL, tID string, localPort int, showQR boo
 //   - errTunnelTerminated when the server sends close code 4000, or when the
 //     WebSocket upgrade is rejected with 401/409 (do not reconnect)
 //   - any other error for unexpected disconnects (caller may reconnect)
-func connectPermanentOnce(ctx context.Context, serverURL, tID, token, localAddr string) error {
+func connectPermanentOnce(ctx context.Context, serverURL, tID, token, localAddr string, rw *rewriteConfig) error {
 	muxURL := toWSURL(serverURL) + "/tunnel/mux?client_id=" + url.QueryEscape(tID) + "&token=" + url.QueryEscape(token)
 	ws, resp, err := websocket.DefaultDialer.Dial(muxURL, nil)
 	if err != nil {
@@ -2979,7 +3090,7 @@ func connectPermanentOnce(ctx context.Context, serverURL, tID, token, localAddr 
 			}
 			return fmt.Errorf("mux session closed: %w", err)
 		case stream := <-streamCh:
-			go handleTunneledConnection(stream, localAddr)
+			go handleTunneledConnection(stream, localAddr, rw)
 		}
 	}
 }
@@ -2988,13 +3099,13 @@ func connectPermanentOnce(ctx context.Context, serverURL, tID, token, localAddr 
 // reconnect logic.  Unlike ephemeral tunnels there is no expiry timer — the
 // connection runs until the context is cancelled, the server terminates it, or
 // the reconnect budget is exhausted.
-func connectPermanentWithReconnect(ctx context.Context, serverURL, tID, token, localAddr string) {
+func connectPermanentWithReconnect(ctx context.Context, serverURL, tID, token, localAddr string, rw *rewriteConfig) {
 	attempt := 0
 	deadline := time.Now().Add(reconnectBudget)
 
 	for {
 		connectedAt := time.Now()
-		err := connectPermanentOnce(ctx, serverURL, tID, token, localAddr)
+		err := connectPermanentOnce(ctx, serverURL, tID, token, localAddr, rw)
 
 		if ctx.Err() != nil {
 			return

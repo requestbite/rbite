@@ -22,6 +22,7 @@ _rbite() {
         --tunnels-list
         -r --resume
         --show-qr
+        --localhost-rewrite
         --tunnel-server
         --no-upgrade-check
         --uninstall

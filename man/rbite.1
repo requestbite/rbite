@@ -128,6 +128,18 @@ or
 .BR \-\-resume .
 Scan the code with a phone camera to open the tunnel URL directly on the device.
 .TP
+.B \-\-localhost\-rewrite
+Rewrite localhost URLs in proxied response bodies and
+.B Location
+headers to the tunnel's public URL.
+When the matched URL contains a port (e.g.\&
+.IR http://localhost:8080 ),
+the port is appended to the first subdomain label of the public URL
+(e.g.\&
+.IR https://name-8080.t.rbite.dev ).
+Only valid with
+.BR \-t / \-\-tunnels .
+.TP
 \fB\-\-tunnel\-server\fR \fIurl\fR
 Override the tunnel server base URL.
 Defaults to

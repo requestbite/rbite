@@ -1,7 +1,8 @@
 # RequestBite rbite Makefile
 # Cross-platform build automation for macOS, Linux, and Windows
 
--include .env
+ENV_FILE ?= .env.dev
+-include $(ENV_FILE)
 export
 
 # Extract version from git tag (strip 'v' prefix), fallback to "dev"

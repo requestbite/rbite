@@ -1,5 +1,8 @@
 build/
 /rbite
-.env
 web/node_modules/
 tmp/
+
+.env
+.env.prod
+.env.dev

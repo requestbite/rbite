@@ -50,6 +50,9 @@ complete -c rbite -s r -l resume \
 complete -c rbite -l show-qr \
     -d 'Print a QR code of the tunnel URL (use with -e or -r)'
 
+complete -c rbite -l localhost-rewrite \
+    -d 'Rewrite localhost URLs in responses to the tunnel public URL (use with -t)'
+
 complete -c rbite -l tunnel-server -r \
     -d 'Tunnel server URL (default: https://api.t.rbite.dev)'
 

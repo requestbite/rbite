@@ -23,6 +23,7 @@ _rbite() {
         '--tunnels-list[List tunnels for the current account]'
         '(-r --resume)'{-r,--resume}'[Resume the last tunnel session if not expired]'
         '--show-qr[Print a QR code of the tunnel URL (use with -e or -r)]'
+        '--localhost-rewrite[Rewrite localhost URLs in responses to the tunnel public URL (use with -t)]'
         '--tunnel-server[Tunnel server URL]:url:'
         # Other
         '--no-upgrade-check[Disable automatic upgrade check on startup]'
