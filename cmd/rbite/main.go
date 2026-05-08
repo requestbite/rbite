@@ -96,6 +96,20 @@ func isTextContentType(ct string) bool {
 // with close code 4000, indicating the client must not attempt to reconnect.
 var errTunnelTerminated = errors.New("tunnel terminated by server")
 
+// errTerminated is a typed variant of errTunnelTerminated that carries the
+// server's close reason (e.g. "timeout", "max_transfer").  It satisfies
+// errors.Is(e, errTunnelTerminated) so existing callers need not change.
+type errTerminated struct{ Reason string }
+
+func (e *errTerminated) Error() string {
+	if e.Reason != "" {
+		return "tunnel terminated: " + e.Reason
+	}
+	return "tunnel terminated"
+}
+
+func (e *errTerminated) Is(target error) bool { return target == errTunnelTerminated }
+
 // Version information — set via ldflags at build time.
 var (
 	Version             = "dev"
@@ -1218,7 +1232,7 @@ const (
 // connectEphemeralOnce opens a single yamux-over-WebSocket connection for an
 // ephemeral tunnel.  It returns:
 //   - nil when the expiry timer fires or the context is cancelled (clean exit)
-//   - errTunnelTerminated when the server sends close code 4000 (do not reconnect)
+//   - *errTerminated when the server sends close code 4000 (do not reconnect)
 //   - any other error for unexpected disconnects (caller may reconnect)
 func connectEphemeralOnce(ctx context.Context, serverURL, clientID, localAddr string, expiresAt time.Time, rw *rewriteConfig) error {
 	muxURL := toWSURL(serverURL) + "/tunnel/mux?client_id=" + clientID
@@ -1282,6 +1296,11 @@ func connectEphemeralOnce(ctx context.Context, serverURL, clientID, localAddr st
 			log.Printf("Tunnel expired. Disconnecting.")
 			return nil
 		case err := <-errCh:
+			// Prefer the close reason stored on the connection — yamux wraps the
+			// original error and errors.Is checks fail without this fallback.
+			if conn.closeErr != nil {
+				return conn.closeErr
+			}
 			if errors.Is(err, errTunnelTerminated) {
 				return errTunnelTerminated
 			}
@@ -1310,7 +1329,19 @@ func connectEphemeralWithReconnect(ctx context.Context, serverURL, clientID, loc
 			return
 		}
 		if errors.Is(err, errTunnelTerminated) {
-			log.Printf("Tunnel terminated by server.")
+			var term *errTerminated
+			if errors.As(err, &term) {
+				switch term.Reason {
+				case "timeout":
+					log.Printf("Session expired (timeout). Disconnecting.")
+				case "max_transfer":
+					log.Printf("Session terminated: transfer limit reached.")
+				default:
+					log.Printf("Tunnel terminated by server.")
+				}
+			} else {
+				log.Printf("Tunnel terminated by server.")
+			}
 			return
 		}
 
@@ -1490,9 +1521,10 @@ func printSessionStats(serverURL, clientID string) {
 // wsConn wraps *websocket.Conn as an io.ReadWriter so io.Copy can drive it.
 // This is a minimal client-side version (no net.Conn deadline methods needed).
 type wsConn struct {
-	ws     *websocket.Conn
-	reader io.Reader
-	mu     sync.Mutex // serialises all WebSocket writes
+	ws       *websocket.Conn
+	reader   io.Reader
+	mu       sync.Mutex // serialises all WebSocket writes
+	closeErr *errTerminated // set when server sends close code 4000
 }
 
 func newWSConn(ws *websocket.Conn) *wsConn {
@@ -1520,11 +1552,13 @@ func (c *wsConn) Read(b []byte) (int, error) {
 		}
 		msgType, r, err := c.ws.NextReader()
 		if err != nil {
-			// Close code 4000 means the server is intentionally terminating this
-			// tunnel; the client must not attempt to reconnect.
-			var closeErr *websocket.CloseError
-			if errors.As(err, &closeErr) && closeErr.Code == 4000 {
-				return 0, errTunnelTerminated
+			// Close code 4000: server is intentionally terminating the tunnel.
+			// Store the reason so connectEphemeralOnce can retrieve it after yamux
+			// wraps the error, then return it so yamux closes its session.
+			var ce *websocket.CloseError
+			if errors.As(err, &ce) && ce.Code == 4000 {
+				c.closeErr = &errTerminated{Reason: ce.Text}
+				return 0, c.closeErr
 			}
 			return 0, err
 		}
@@ -3066,8 +3100,8 @@ func runPermanentTunnel(serverURL, apiURL, tID string, localPort int, showQR boo
 // connectPermanentOnce opens a single yamux-over-WebSocket connection for a
 // permanent tunnel.  It returns:
 //   - nil when the context is cancelled (clean exit)
-//   - errTunnelTerminated when the server sends close code 4000, or when the
-//     WebSocket upgrade is rejected with 401/409 (do not reconnect)
+//   - *errTerminated (IS errTunnelTerminated) when the server sends close code 4000
+//   - errTunnelTerminated (wrapped) when the upgrade is rejected with 401/409
 //   - any other error for unexpected disconnects (caller may reconnect)
 func connectPermanentOnce(ctx context.Context, serverURL, tID, token, localAddr string, rw *rewriteConfig) error {
 	muxURL := toWSURL(serverURL) + "/tunnel/mux?client_id=" + url.QueryEscape(tID) + "&token=" + url.QueryEscape(token)
@@ -3130,6 +3164,9 @@ func connectPermanentOnce(ctx context.Context, serverURL, tID, token, localAddr 
 		case <-ctx.Done():
 			return nil
 		case err := <-errCh:
+			if conn.closeErr != nil {
+				return conn.closeErr
+			}
 			if errors.Is(err, errTunnelTerminated) {
 				return errTunnelTerminated
 			}
@@ -3159,7 +3196,19 @@ func connectPermanentWithReconnect(ctx context.Context, serverURL, tID, token, l
 			return
 		}
 		if errors.Is(err, errTunnelTerminated) {
-			log.Printf("Tunnel terminated by server: %v", err)
+			var term *errTerminated
+			if errors.As(err, &term) {
+				switch term.Reason {
+				case "timeout":
+					log.Printf("Session expired (timeout). Disconnecting.")
+				case "max_transfer":
+					log.Printf("Session terminated: transfer limit reached.")
+				default:
+					log.Printf("Tunnel terminated by server.")
+				}
+			} else {
+				log.Printf("Tunnel terminated by server: %v", err)
+			}
 			return
 		}
 
