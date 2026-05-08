@@ -1573,6 +1573,47 @@ func printQR(rawURL string) {
 	fmt.Println()
 }
 
+// printPortRewriteWarning prints a red bordered warning when --localhost-rewrite
+// is active on a tunnel that restricts accessible ports.
+func printPortRewriteWarning() {
+	const inner = 73 // number of ═ between the corner pieces
+	top    := "╔" + strings.Repeat("═", inner) + "╗"
+	bottom := "╚" + strings.Repeat("═", inner) + "╝"
+	empty  := "║" + strings.Repeat(" ", inner) + "║"
+
+	center := func(text string) string {
+		space := inner - len(text)
+		if space < 0 {
+			space = 0
+		}
+		left := space / 2
+		right := space - left
+		return "║" + strings.Repeat(" ", left) + text + strings.Repeat(" ", right) + "║"
+	}
+
+	title    := "Please note!"
+	underline := strings.Repeat("=", len(title))
+	bodyLines := []string{
+		"The tunnel you have enabled localhost rewrites for has",
+		"restrictions on what ports it will allow access to.",
+		"This might cause usability issues if a rewritten port",
+		"is not accepted by the tunnel.",
+	}
+
+	fmt.Printf("\n%s", ansiRed)
+	fmt.Println(top)
+	fmt.Println(empty)
+	fmt.Println(center(title))
+	fmt.Println(center(underline))
+	fmt.Println(empty)
+	for _, l := range bodyLines {
+		fmt.Println(center(l))
+	}
+	fmt.Println(empty)
+	fmt.Print(bottom)
+	fmt.Printf("%s\n\n", ansiReset)
+}
+
 // getEnv retrieves environment variable with fallback default value
 func getEnv(key, fallback string) string {
 	if value, exists := os.LookupEnv(key); exists {
@@ -2986,6 +3027,10 @@ func runPermanentTunnel(serverURL, apiURL, tID string, localPort int, showQR boo
 	fmt.Printf("Press Ctrl+C to stop\n\n")
 	if showQR {
 		printQR(details.PublicURL)
+	}
+
+	if localhostRewrite && len(details.Ports) > 0 {
+		printPortRewriteWarning()
 	}
 
 	// Persist resume state before blocking so Ctrl+C restarts cleanly.
