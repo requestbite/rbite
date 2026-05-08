@@ -86,6 +86,15 @@ Mutually exclusive with
 and
 .BR \-\-resume .
 .TP
+\fB\-p\fR \fIpassphrase\fR, \fB\-\-passphrase\fR \fIpassphrase\fR
+Protect the file browser with a passphrase.
+Visitors must enter the passphrase in a modal dialog before they can browse or
+download files.
+Only valid with
+.B \-f / \-\-files
+or
+.BR \-fw / \-\-files\-write .
+.TP
 \fB\-e\fR \fIport\fR, \fB\-\-ephemeral\fR \fIport\fR
 Create an ephemeral tunnel exposing the local TCP port \fIport\fR to the public
 internet.
@@ -189,6 +198,11 @@ rbite \-fw .
 Share a specific directory with upload support and show a QR code:
 .EX
 rbite \-\-files\-write ~/Downloads \-\-show\-qr
+.EE
+.TP
+Share the current directory with a passphrase:
+.EX
+rbite \-f . \-p mysecret
 .EE
 .TP
 Connect a permanent tunnel named \fImyapp\fR:

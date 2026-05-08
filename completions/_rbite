@@ -18,6 +18,7 @@ _rbite() {
         # Tunnel management
         '(-f --files)'{-f,--files}'[Share a local directory via ephemeral tunnel (read-only)]:directory:_files -/'
         '--files-write[Share a local directory via ephemeral tunnel with upload support (read/write)]:directory:_files -/'
+        '(-p --passphrase)'{-p,--passphrase}'[Protect the file browser with a passphrase (use with -f or -fw)]:passphrase:'
         '(-e --ephemeral)'{-e,--ephemeral}'[Port to expose via ephemeral tunnel]:port:'
         '(-t --tunnels)'{-t,--tunnels}'[Connect a permanent tunnel by name]:tunnel name:'
         '--tunnels-list[List tunnels for the current account]'

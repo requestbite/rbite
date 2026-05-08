@@ -24,6 +24,7 @@ const result = esbuild.buildSync({
 });
 
 const js = result.outputFiles[0].text;
+const authJs = fs.readFileSync(path.join(__dirname, "src/auth.js"), "utf8");
 
 const html = `<!DOCTYPE html>
 <html lang="en">
@@ -38,8 +39,9 @@ const html = `<!DOCTYPE html>
 </head>
 <body>
 <div id="app"></div>
-<script>window.__WRITABLE__={{WRITABLE}};</script>
+<script>window.__WRITABLE__={{WRITABLE}};window.__AUTH_REQUIRED__={{AUTH_REQUIRED}};</script>
 <script>${js}</script>
+<script>${authJs}</script>
 </body>
 </html>`;
 

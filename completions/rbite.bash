@@ -17,6 +17,7 @@ _rbite() {
         --views-open
         -f --files
         --files-write
+        -p --passphrase
         -e --ephemeral
         -t --tunnels
         --tunnels-list
@@ -34,6 +35,11 @@ _rbite() {
         -f|--files|--files-write)
             # Expects a directory path
             _filedir -d
+            return 0
+            ;;
+        -p|--passphrase)
+            # Expects a passphrase string; offer nothing
+            COMPREPLY=()
             return 0
             ;;
         -e|--ephemeral)

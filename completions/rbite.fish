@@ -35,6 +35,9 @@ complete -c rbite -s f -l files -r -F \
 complete -c rbite -l files-write -r -F \
     -d 'Share a local directory via ephemeral tunnel with upload support (read/write); short form: -fw'
 
+complete -c rbite -s p -l passphrase -r \
+    -d 'Protect the file browser with a passphrase (use with -f or -fw)'
+
 complete -c rbite -s e -l ephemeral -r \
     -d 'Port to expose via ephemeral tunnel'
 

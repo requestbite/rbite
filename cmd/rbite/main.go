@@ -275,7 +275,8 @@ func printHelp() {
   fmt.Printf("      --show-qr               Print a QR code of the tunnel URL (use with -e or -r)\n")
   fmt.Printf("      --tunnel-server string  Tunnel server URL (default %q)\n\n", defaultServer)
 	fmt.Printf("  -f, --files string          Share a local directory via ephemeral tunnel (built-in file browser, read-only)\n")
-	fmt.Printf(" -fw, --files-write string    Share a local directory via ephemeral tunnel with upload support (read/write)\n\n")
+	fmt.Printf(" -fw, --files-write string    Share a local directory via ephemeral tunnel with upload support (read/write)\n")
+	fmt.Printf("  -p, --passphrase string     Set a passphrase for Basic Auth on file server (use with -f or -fw)\n\n")
   fmt.Printf("  -t, --tunnels string        Connect a permanent tunnel by name\n")
   fmt.Printf("      --tunnels-list          List tunnels for the current account\n")
 	fmt.Println("\nOther\n=====")
@@ -443,7 +444,21 @@ func fileDownloadHandler(rootPath string) http.HandlerFunc {
 	}
 }
 
-func startFileHTTPServer(rootPath string, writable bool) (net.Listener, error) {
+// basicAuthMiddleware wraps an http.Handler with Basic Authentication.
+// Note: We don't set WWW-Authenticate header to prevent browser's built-in auth dialog.
+// The web client handles auth with its own modal.
+func basicAuthMiddleware(handler http.Handler, username, password string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		user, pass, hasAuth := r.BasicAuth()
+		if !hasAuth || user != username || pass != password {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		handler.ServeHTTP(w, r)
+	}
+}
+
+func startFileHTTPServer(rootPath string, writable bool, passphrase string) (net.Listener, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, err
@@ -458,18 +473,45 @@ func startFileHTTPServer(rootPath string, writable bool) (net.Listener, error) {
 	if writable {
 		writableStr = "true"
 	}
+	hasAuth := passphrase != ""
+	authStr := "false"
+	if hasAuth {
+		authStr = "true"
+	}
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		html := strings.Replace(fileServerHTML, "{{VERSION}}", Version, 1)
 		html = strings.Replace(html, "{{WRITABLE}}", writableStr, 1)
+		html = strings.Replace(html, "{{AUTH_REQUIRED}}", authStr, 1)
 		fmt.Fprint(w, html)
 	})
-	srv := &http.Server{Handler: mux}
+	
+	var handler http.Handler = mux
+	if hasAuth {
+		// Apply Basic Auth only to API endpoints, not the root page
+		// The root page loads without auth, then JS on the page handles API auth
+		apiMux := http.NewServeMux()
+		apiMux.HandleFunc("/api/ls", basicAuthMiddleware(http.HandlerFunc(fileListHandler(rootPath)), "", passphrase))
+		apiMux.HandleFunc("/api/download", basicAuthMiddleware(http.HandlerFunc(fileDownloadHandler(rootPath)), "", passphrase))
+		if writable {
+			apiMux.HandleFunc("/api/upload", basicAuthMiddleware(http.HandlerFunc(fileUploadHandler(rootPath)), "", passphrase))
+		}
+		// For non-API routes, use the original mux (which has the root handler)
+		handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.HasPrefix(r.URL.Path, "/api/") {
+				apiMux.ServeHTTP(w, r)
+			} else {
+				mux.ServeHTTP(w, r)
+			}
+		})
+	}
+	
+	srv := &http.Server{Handler: handler}
 	go srv.Serve(ln) //nolint:errcheck
 	return ln, nil
 }
 
-func runFileServer(rootPath string, showQR bool, serverURL string, writable bool) error {
+func runFileServer(rootPath string, showQR bool, serverURL string, writable bool, passphrase string) error {
 	absRoot, err := filepath.Abs(rootPath)
 	if err != nil {
 		return fmt.Errorf("invalid path: %w", err)
@@ -490,7 +532,7 @@ func runFileServer(rootPath string, showQR bool, serverURL string, writable bool
 		return err
 	}
 
-	ln, err := startFileHTTPServer(absRoot, writable)
+	ln, err := startFileHTTPServer(absRoot, writable, passphrase)
 	if err != nil {
 		return fmt.Errorf("could not start file server: %w", err)
 	}
@@ -577,6 +619,7 @@ func main() {
 		filesWritePath   string
 		listTunnels      bool
 		localhostRewrite bool
+		passphrase       string
 	)
 	defaultServer := buildDefaultServerURL()
 
@@ -607,6 +650,8 @@ func main() {
 	flag.StringVar(&openViewID, "views-open", "", "")
 	flag.StringVar(&addViewName, "views-add", "", "")
 	flag.BoolVar(&localhostRewrite, "localhost-rewrite", false, "")
+	flag.StringVar(&passphrase, "p", "", "")
+	flag.StringVar(&passphrase, "passphrase", "", "")
 	flag.Usage = printHelp
 
 	// Pre-scan os.Args to detect --views-tail / --views-open / --views-add without a
@@ -772,7 +817,7 @@ func main() {
 		if !noUpgradeCheck && !isRunningInDevelopment() {
 			checkForUpdates()
 		}
-		if err := runFileServer(filesPath, showQR, serverURL, false); err != nil {
+		if err := runFileServer(filesPath, showQR, serverURL, false, passphrase); err != nil {
 			log.Fatalf("File server failed: %v", err)
 		}
 		os.Exit(0)
@@ -786,7 +831,7 @@ func main() {
 		if !noUpgradeCheck && !isRunningInDevelopment() {
 			checkForUpdates()
 		}
-		if err := runFileServer(filesWritePath, showQR, serverURL, true); err != nil {
+		if err := runFileServer(filesWritePath, showQR, serverURL, true, passphrase); err != nil {
 			log.Fatalf("File server failed: %v", err)
 		}
 		os.Exit(0)
