@@ -38,6 +38,12 @@ complete -c rbite -l files-write -r -F \
 complete -c rbite -s p -l passphrase -r \
     -d 'Protect the file browser with a passphrase (use with -f or -fw)'
 
+complete -c rbite -s w -l web-server -r -F \
+    -d 'Serve a local directory via ephemeral tunnel (plain web server)'
+
+complete -c rbite -l spa -F \
+    -d 'Enable SPA mode: serve index-file for all unmatched paths (default: index.html)'
+
 complete -c rbite -s e -l ephemeral -r \
     -d 'Port to expose via ephemeral tunnel'
 

@@ -95,6 +95,27 @@ Only valid with
 or
 .BR \-fw / \-\-files\-write .
 .TP
+\fB\-w\fR \fIdir\fR, \fB\-\-web\-server\fR \fIdir\fR
+Start a plain web server rooted at the local directory \fIdir\fR and expose it
+over an ephemeral tunnel.
+Files are served exactly as they exist on disk, including directory listings for
+paths that resolve to a directory.
+No built-in web interface is added.
+Mutually exclusive with
+.B \-\-ephemeral
+and
+.BR \-\-resume .
+.TP
+\fB\-\-spa\fR [\fIindex-file\fR]
+Enable single-page application mode when serving with
+.BR \-w / \-\-web\-server .
+Any request to a path that does not exist on disk is served \fIindex-file\fR
+instead of a 404 response, allowing client-side routers to handle the path.
+When \fIindex-file\fR is omitted it defaults to
+.IR index.html .
+Only valid with
+.BR \-w / \-\-web\-server .
+.TP
 \fB\-e\fR \fIport\fR, \fB\-\-ephemeral\fR \fIport\fR
 Create an ephemeral tunnel exposing the local TCP port \fIport\fR to the public
 internet.
@@ -133,6 +154,7 @@ Intended for use with
 .BR \-\-ephemeral ,
 .BR \-\-files ,
 .BR \-\-files\-write ,
+.BR \-\-web\-server ,
 or
 .BR \-\-resume .
 Scan the code with a phone camera to open the tunnel URL directly on the device.
@@ -203,6 +225,21 @@ rbite \-\-files\-write ~/Downloads \-\-show\-qr
 Share the current directory with a passphrase:
 .EX
 rbite \-f . \-p mysecret
+.EE
+.TP
+Serve the current directory as a plain web server:
+.EX
+rbite \-w .
+.EE
+.TP
+Serve a build directory in SPA mode (fallback to index.html):
+.EX
+rbite \-w ./dist \-\-spa
+.EE
+.TP
+Serve a build directory in SPA mode with a custom entry point:
+.EX
+rbite \-w ./dist \-\-spa app.html
 .EE
 .TP
 Connect a permanent tunnel named \fImyapp\fR:

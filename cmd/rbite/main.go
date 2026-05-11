@@ -277,6 +277,8 @@ func printHelp() {
 	fmt.Printf("  -f, --files string          Share a local directory via ephemeral tunnel (built-in file browser, read-only)\n")
 	fmt.Printf(" -fw, --files-write string    Share a local directory via ephemeral tunnel with upload support (read/write)\n")
 	fmt.Printf("  -p, --passphrase string     Set a passphrase for Basic Auth on file server (use with -f or -fw)\n\n")
+	fmt.Printf("  -w, --web-server string     Serve a local directory via ephemeral tunnel (through built-in web server)\n")
+	fmt.Printf("      --spa [index-file]      Enable SPA mode: serve index-file for all unmatched paths (default: index.html)\n\n")
   fmt.Printf("  -t, --tunnels string        Connect a permanent tunnel by name\n")
   fmt.Printf("      --tunnels-list          List tunnels for the current account\n")
 	fmt.Println("\nOther\n=====")
@@ -589,6 +591,119 @@ func runFileServer(rootPath string, showQR bool, serverURL string, writable bool
 	return nil
 }
 
+// spaHandler wraps a file server so that requests to non-existent paths fall
+// back to indexFile (e.g. "index.html") instead of returning a 404.
+func spaHandler(rootPath, indexFile string, fs http.Handler) http.Handler {
+	indexPath := filepath.Join(rootPath, indexFile)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		absPath, err := safePath(rootPath, r.URL.Path)
+		if err != nil {
+			fs.ServeHTTP(w, r)
+			return
+		}
+		if _, err := os.Stat(absPath); os.IsNotExist(err) {
+			http.ServeFile(w, r, indexPath)
+			return
+		}
+		fs.ServeHTTP(w, r)
+	})
+}
+
+func startWebHTTPServer(rootPath, spaIndex string) (net.Listener, error) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, err
+	}
+	fs := http.FileServer(http.Dir(rootPath))
+	var handler http.Handler
+	if spaIndex == "" {
+		handler = fs
+	} else {
+		handler = spaHandler(rootPath, spaIndex, fs)
+	}
+	srv := &http.Server{Handler: handler}
+	go srv.Serve(ln) //nolint:errcheck
+	return ln, nil
+}
+
+func runWebServer(rootPath string, showQR bool, serverURL, spaIndex string) error {
+	absRoot, err := filepath.Abs(rootPath)
+	if err != nil {
+		return fmt.Errorf("invalid path: %w", err)
+	}
+	info, err := os.Stat(absRoot)
+	if os.IsNotExist(err) {
+		return fmt.Errorf("path does not exist: %s", absRoot)
+	}
+	if err != nil {
+		return fmt.Errorf("cannot access path: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s is a file, not a directory; pass a directory path", absRoot)
+	}
+
+	cfg, err := loadOrCreateConfig()
+	if err != nil {
+		return err
+	}
+
+	ln, err := startWebHTTPServer(absRoot, spaIndex)
+	if err != nil {
+		return fmt.Errorf("could not start web server: %w", err)
+	}
+	defer ln.Close()
+
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	ephemeralResp, err := createEphemeralTunnel(serverURL, port, cfg.ClientID)
+	if err != nil {
+		if errors.Is(err, errSessionConflict) {
+			return fmt.Errorf("this client already has a session open. Only 1 ephemeral session is possible at once")
+		}
+		return fmt.Errorf("failed to create ephemeral tunnel: %w", err)
+	}
+
+	tunnelURL := ephemeralResp.URL
+	expiresAt := ephemeralResp.ExpiresAt
+	expiresIn := int(time.Until(expiresAt).Minutes())
+	if time.Until(expiresAt) > time.Duration(expiresIn)*time.Minute {
+		expiresIn++
+	}
+
+	fmt.Printf("\n%s\n", tunnelArt)
+	fmt.Printf("Serving directory: %s\n", absRoot)
+	if spaIndex != "" {
+		fmt.Printf("Mode: SPA (fallback to %s)\n", spaIndex)
+	}
+	fmt.Printf("Ephemeral tunnel created. Expires at %s (in %d minutes).\n", expiresAt.Local().Format("15:04:05"), expiresIn)
+	fmt.Printf("> Web server: https://%s\n", tunnelURL)
+	fmt.Printf("Press Ctrl+C to stop\n\n")
+
+	if showQR {
+		printQR("https://" + tunnelURL)
+	}
+
+	cfg.LastSessionType = "ephemeral"
+	cfg.LastTunnelID = ""
+	cfg.LastLocalPort = port
+	_ = saveConfig(cfg)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt)
+	go func() {
+		<-sigCh
+		fmt.Println()
+		cancel()
+	}()
+
+	localAddr := fmt.Sprintf("localhost:%d", port)
+	connectEphemeralWithReconnect(ctx, serverURL, cfg.ClientID, localAddr, expiresAt, nil)
+	printSessionStats(serverURL, cfg.ClientID)
+	return nil
+}
+
 func main() {
 	// Load .env file for local development only.
 	// In production builds the compile-time defaults are baked in via ldflags,
@@ -617,6 +732,8 @@ func main() {
 		showQR           bool
 		filesPath        string
 		filesWritePath   string
+		webServerPath    string
+		spaIndexFile     string
 		listTunnels      bool
 		localhostRewrite bool
 		passphrase       string
@@ -652,6 +769,9 @@ func main() {
 	flag.BoolVar(&localhostRewrite, "localhost-rewrite", false, "")
 	flag.StringVar(&passphrase, "p", "", "")
 	flag.StringVar(&passphrase, "passphrase", "", "")
+	flag.StringVar(&webServerPath, "w", "", "")
+	flag.StringVar(&webServerPath, "web-server", "", "")
+	flag.StringVar(&spaIndexFile, "spa", "", "")
 	flag.Usage = printHelp
 
 	// Pre-scan os.Args to detect --views-tail / --views-open / --views-add without a
@@ -659,6 +779,7 @@ func main() {
 	viewTailNoID := false
 	viewOpenNoID := false
 	viewAddNoName := false
+	spaNoFile := false
 	filteredArgs := make([]string, 0, len(os.Args)-1)
 	for i := 1; i < len(os.Args); i++ {
 		arg := os.Args[i]
@@ -681,6 +802,12 @@ func main() {
 				filteredArgs = append(filteredArgs, arg)
 			} else {
 				viewAddNoName = true
+			}
+		case arg == "--spa" || arg == "-spa":
+			if hasValue {
+				filteredArgs = append(filteredArgs, arg)
+			} else {
+				spaNoFile = true
 			}
 		default:
 			filteredArgs = append(filteredArgs, arg)
@@ -835,6 +962,30 @@ func main() {
 			log.Fatalf("File server failed: %v", err)
 		}
 		os.Exit(0)
+	}
+
+	// Plain web server (no built-in UI)
+	if webServerPath != "" {
+		if ephemeralPort != 0 || resume {
+			log.Fatal("Error: -w/--web-server cannot be used together with -e/--ephemeral or --resume")
+		}
+		effectiveSPAIndex := ""
+		if spaNoFile {
+			effectiveSPAIndex = "index.html"
+		} else if spaIndexFile != "" {
+			effectiveSPAIndex = spaIndexFile
+		}
+		if !noUpgradeCheck && !isRunningInDevelopment() {
+			checkForUpdates()
+		}
+		if err := runWebServer(webServerPath, showQR, serverURL, effectiveSPAIndex); err != nil {
+			log.Fatalf("Web server failed: %v", err)
+		}
+		os.Exit(0)
+	}
+
+	if spaNoFile || spaIndexFile != "" {
+		log.Fatal("Error: --spa can only be used with -w/--web-server")
 	}
 
 	// Check for updates (unless disabled or running in development)

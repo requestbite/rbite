@@ -18,6 +18,8 @@ _rbite() {
         -f --files
         --files-write
         -p --passphrase
+        -w --web-server
+        --spa
         -e --ephemeral
         -t --tunnels
         --tunnels-list
@@ -32,9 +34,14 @@ _rbite() {
     )
 
     case "$prev" in
-        -f|--files|--files-write)
+        -f|--files|--files-write|-w|--web-server)
             # Expects a directory path
             _filedir -d
+            return 0
+            ;;
+        --spa)
+            # Optional index file path
+            _filedir
             return 0
             ;;
         -p|--passphrase)
