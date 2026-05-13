@@ -1629,9 +1629,12 @@ func handleTunneledConnection(stream net.Conn, localAddr string, rw *rewriteConf
 	}
 	defer resp.Body.Close()
 
+	// SSE responses require unbuffered streaming; treat them like WebSocket upgrades.
+	isSSE := strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream")
+
 	// Localhost rewriting: mutate the response before forwarding it to the caller.
-	// Skip for WebSocket upgrades — the body is a raw stream, not HTTP.
-	if rw != nil && resp.StatusCode != http.StatusSwitchingProtocols {
+	// Skip for WebSocket upgrades and SSE — both are unbounded streaming protocols.
+	if rw != nil && resp.StatusCode != http.StatusSwitchingProtocols && !isSSE {
 		extractPort := func(match string) string {
 			sub := localhostPattern.FindStringSubmatch(match)
 			if len(sub) > 2 && len(sub[2]) > 1 {
@@ -1672,6 +1675,16 @@ func handleTunneledConnection(stream net.Conn, localAddr string, rw *rewriteConf
 		}
 	}
 
+	// SSE: write headers immediately then relay body chunk-by-chunk so each event
+	// reaches the client without waiting for resp.Write's internal 4 KiB bufio flush.
+	if isSSE {
+		if err := streamSSEResponse(stream, resp); err != nil {
+			log.Printf("SSE stream error: %v", err)
+		}
+		log.Printf("%s %s %d %s [SSE closed]", req.Method, req.URL.RequestURI(), resp.StatusCode, time.Since(start).Round(time.Millisecond))
+		return
+	}
+
 	if err := resp.Write(stream); err != nil {
 		log.Printf("failed to write response: %v", err)
 		return
@@ -1687,6 +1700,52 @@ func handleTunneledConnection(stream net.Conn, localAddr string, rw *rewriteConf
 	}
 
 	log.Printf("%s %s %d %s", req.Method, req.URL.RequestURI(), resp.StatusCode, time.Since(start).Round(time.Millisecond))
+}
+
+// streamSSEResponse writes the HTTP status line + headers to w immediately (no
+// bufio batching), then streams resp.Body as chunked-encoded data so each SSE
+// event is delivered without waiting for an internal 4 KiB buffer to fill.
+// resp.Write cannot be used here because it wraps w in a bufio.Writer whose
+// Flush is only called after the body copy returns — which never happens for SSE.
+func streamSSEResponse(w io.Writer, resp *http.Response) error {
+	h := resp.Header.Clone()
+	h.Del("Content-Length")
+	h.Set("Transfer-Encoding", "chunked")
+
+	var hdr bytes.Buffer
+	status := resp.Status
+	if status == "" {
+		status = fmt.Sprintf("%d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
+	}
+	fmt.Fprintf(&hdr, "HTTP/1.1 %s\r\n", status)
+	_ = h.Write(&hdr)
+	hdr.WriteString("\r\n")
+	if _, err := w.Write(hdr.Bytes()); err != nil {
+		return err
+	}
+
+	buf := make([]byte, 32*1024)
+	for {
+		n, readErr := resp.Body.Read(buf)
+		if n > 0 {
+			// Assemble the full chunk (header + data + CRLF) in one Write so it
+			// lands in a single yamux DATA frame rather than three separate ones.
+			var chunk bytes.Buffer
+			fmt.Fprintf(&chunk, "%x\r\n", n)
+			chunk.Write(buf[:n])
+			chunk.WriteString("\r\n")
+			if _, err := w.Write(chunk.Bytes()); err != nil {
+				return err
+			}
+		}
+		if readErr == io.EOF {
+			_, err := io.WriteString(w, "0\r\n\r\n")
+			return err
+		}
+		if readErr != nil {
+			return readErr
+		}
+	}
 }
 
 // printSessionStats fetches session statistics from the server and prints them.
