@@ -1617,6 +1617,9 @@ func handleTunneledConnection(stream net.Conn, localAddr string, rw *rewriteConf
 
 	localBuf := bufio.NewReader(localConn)
 
+	// Rewrite Host so local services (e.g. Vite) see localhost, not the tunnel hostname.
+	req.Host = targetAddr
+
 	if err := req.Write(localConn); err != nil {
 		log.Printf("failed to forward request: %v", err)
 		return
